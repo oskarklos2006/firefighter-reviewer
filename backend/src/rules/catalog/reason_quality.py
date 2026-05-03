@@ -20,6 +20,16 @@ _MODULE_TCODE_MAP: dict[str, set[str]] = {
     "period":       {"OB52", "MMPV"},
 }
 
+# Tcodes that are diagnostic/navigational and appear in any session
+# regardless of module — never flag these as out-of-scope
+_NEUTRAL_TCODES = {
+    "SU53",           # Display Authorization Check
+    "SU3",            # Maintain Own User Data
+    "SE80",           # Object Navigator
+    "SESSION_MANAGER", # Session Manager
+    "/NEX",           # Logoff
+    "SM04",           # User List
+}
 
 def check_r001(session: SessionData) -> list[Finding]:
     """Reason code is empty, too short, or generically useless."""
@@ -63,37 +73,49 @@ def check_r001(session: SessionData) -> list[Finding]:
 
 def check_r002(session: SessionData) -> list[Finding]:
     """Reason mentions one module but transactions touch a different one."""
-    findings = []
     reason_lower = session.reason_code.lower()
     tcodes_used = {e.tcode for e in session.transaction_log}
 
-    for module_keyword, expected_tcodes in _MODULE_TCODE_MAP.items():
-        if module_keyword not in reason_lower:
-            continue
+    # Collect ALL modules mentioned in the reason
+    matched_modules = {
+        keyword for keyword in _MODULE_TCODE_MAP
+        if keyword in reason_lower
+    }
 
-        # Reason mentions this module — check for tcodes from OTHER modules
-        other_module_tcodes: set[str] = set()
-        for other_keyword, other_tcodes in _MODULE_TCODE_MAP.items():
-            if other_keyword == module_keyword:
-                continue
-            # Only flag tcodes that are clearly from a different domain
-            out_of_scope = (tcodes_used & other_tcodes) - expected_tcodes
-            other_module_tcodes.update(out_of_scope)
+    if not matched_modules:
+        return []
 
-        if other_module_tcodes:
-            findings.append(Finding(
-                rule_id="R-002",
-                severity=Severity.HIGH,
-                location="transaction_log",
-                description=(
-                    f"Reason references '{module_keyword}' activity but session "
-                    f"also contains transactions outside that scope."
-                ),
-                evidence=(
-                    f"Reason: '{session.reason_code}'; "
-                    f"Out-of-scope tcodes: {', '.join(sorted(other_module_tcodes))}"
-                ),
-            ))
-            break  # one finding per session for R-002 is enough
+    # All tcodes that are expected given the stated reason
+    all_expected_tcodes: set[str] = set()
+    for keyword in matched_modules:
+        all_expected_tcodes.update(_MODULE_TCODE_MAP[keyword])
 
+    # Tcodes used that belong to a known module but not any expected one
+    all_known_tcodes: set[str] = set()
+    for tcodes in _MODULE_TCODE_MAP.values():
+        all_known_tcodes.update(tcodes)
+
+    out_of_scope = (
+        tcodes_used
+        & all_known_tcodes          # only flag tcodes we know about
+        - all_expected_tcodes       # that aren't expected
+        - _NEUTRAL_TCODES           # that aren't neutral/diagnostic
+    )
+
+    if not out_of_scope:
+        return []
+
+    return [Finding(
+        rule_id="R-002",
+        severity=Severity.HIGH,
+        location="transaction_log",
+        description=(
+            f"Reason references {', '.join(sorted(matched_modules))} activity "
+            f"but session contains transactions outside that scope."
+        ),
+        evidence=(
+            f"Reason: '{session.reason_code}'; "
+            f"Out-of-scope tcodes: {', '.join(sorted(out_of_scope))}"
+        ),
+    )]
     return findings

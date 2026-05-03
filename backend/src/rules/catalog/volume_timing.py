@@ -68,7 +68,8 @@ def check_r007(session: SessionData) -> list[Finding]:
     reason_lower = session.reason_code.lower()
     emergency_keywords = [
         "emergency", "critical", "urgent", "outage", "down", "failed",
-        "failure", "blocked", "incident", "inc", "production issue"
+        "failure", "incident", "production issue", "p1", "p2",
+        "system down", "not working", "unavailable"
     ]
     has_emergency_signal = any(kw in reason_lower for kw in emergency_keywords)
 
