@@ -55,6 +55,11 @@ Rules:
 - NEEDS_CORRECTION if reason is vague, actions are ambiguous, or minor issues exist
 - PASS only if reason is specific, actions are aligned, and no significant findings exist
 
+The following transactions are neutral navigation/diagnostic tools that appear 
+in almost every session and should never be flagged as suspicious on their own:
+SE80 (Object Navigator), SU53 (Authorization Check), SU3 (User Data), 
+SESSION_MANAGER, /NEX (Logoff), SM04 (User List).
+
 Respond in this exact JSON format with no markdown, no explanation outside the JSON:
 {
   "verdict": "PASS" | "REJECT" | "NEEDS_CORRECTION",

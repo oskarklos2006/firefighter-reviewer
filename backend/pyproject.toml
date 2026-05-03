@@ -24,6 +24,8 @@ dependencies = [
 
     # Date/time handling - SAP logs are always UTC ISO 8601
     "python-dateutil>=2.9",
+
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
