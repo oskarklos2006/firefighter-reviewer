@@ -12,7 +12,6 @@ uvicorn src.main:app --reload
 
 # 2. Open the frontend
 # Just double-click frontend/index.html in your file explorer
-# OR open http://127.0.0.1:5500 if using VSCode Live Server
 
 # 3. Run fast tests (no LLM, instant)
 cd backend
@@ -101,283 +100,431 @@ firefighter-reviewer/
 
 ## File-by-File Explanation
 
-### `backend/src/config.py`
-Reads the `.env` file and exposes everything as a typed Python object called `settings`. Every other file imports `settings` instead of calling `os.getenv()` directly. This means:
-- Type errors caught at startup, not at runtime
-- One place to change any configuration
-- Easy to see all config options at a glance
+---
 
-**Key settings:** `llm_api_key`, `llm_model`, `llm_base_url`, plus rule thresholds like `max_session_minutes` (120) and `max_changes_single_table` (5).
+### `main.py`
+**One line. Just starts the app.**
+
+```python
+from api.routes import app
+```
+
+Uvicorn runs this file. It finds `app` and starts the HTTP server. All actual logic lives elsewhere. Think of it as the front door — it just points you inside.
+
+---
+
+### `config.py`
+**Reads your `.env` file and makes settings available everywhere — typed and validated.**
+
+Without it you'd scatter this across every file:
+```python
+import os
+key = os.getenv("LLM_API_KEY")  # could be None, no warning
+```
+
+With it, you import `settings` once and it's always correct:
+```python
+from config import settings
+settings.llm_api_key            # always a string
+settings.llm_model              # "google/gemma-4-31b-it:free"
+settings.max_session_minutes    # 120
+```
+
+If you forget to add `LLM_API_KEY` to `.env`, the app refuses to start with a clear error. No silent failures at 3am.
 
 ---
 
 ### `rules/models.py`
-Defines all internal data structures as Python dataclasses. The important ones:
+**Defines the shape of every object the system passes around internally.**
 
-- `SessionData` — the full parsed session (all logs, metadata, timestamps)
-- `Finding` — one compliance issue detected (rule_id, severity, location, description, evidence)
-- `Severity` — enum: low / medium / high / critical
-- `Verdict` — enum: PASS / REJECT / NEEDS_CORRECTION
+Without it, rules would work with raw dicts:
+```python
+session["transaction_log"][0]["tcode"]  # crashes if key missing
+```
 
-**Why dataclasses not Pydantic?** These are internal objects — rule functions pass them around. Pydantic is only used at the HTTP boundary (API input/output). Mixing the two would couple rule logic to API concerns.
+With it, every rule gets clean typed objects:
+```python
+session.transaction_log[0].tcode        # always a string
+session.start_time                       # always UTC-aware datetime
+session.change_log[0].old_value         # always a string
+```
+
+Key types:
+- `SessionData` — the whole session (logs, timestamps, reason code, etc.)
+- `Finding` — one compliance issue detected
+- `Severity` — low / medium / high / critical
+- `Verdict` — PASS / REJECT / NEEDS_CORRECTION
 
 ---
 
 ### `rules/parser.py`
-Takes a raw Python dict (from `json.load()`) and returns a clean `SessionData` object.
+**Takes raw uploaded JSON and converts it into a clean `SessionData` object.**
 
-**Key decisions made here:**
-- Uses `dateutil` not `datetime.fromisoformat` — handles timezone quirks in real SAP logs
-- Always attaches UTC timezone to timestamps — prevents comparison crashes
-- Casts all values to `str` — SAP sometimes logs numbers as integers in JSON
-- Optional fields default to `None` — `ticket_requester` isn't always present
-- Raises `ValueError` with clear messages on malformed input — API returns 422 instead of 500
+Raw input:
+```json
+{
+  "start_time": "2026-05-12T12:35:53Z",
+  "reason_code": "fix",
+  "change_log": [{"table": "LFA1", "key": 100234}]
+}
+```
+
+What you get back:
+```python
+session.start_time              # datetime(2026, 5, 12, 12, 35, 53, tzinfo=UTC)
+session.reason_code             # "fix"
+session.change_log[0].key       # "100234"  ← integer cast to string
+session.ticket_requester        # None  ← missing field, defaulted safely
+```
+
+It silently fixes: missing timezone on timestamps, integers where strings expected, absent optional fields.
+It loudly raises `ValueError` for missing required fields like `session_id` — the API catches this and returns 422 instead of 500.
 
 ---
 
-### `rules/catalog/dangerous_actions.py` — R003, R004, R005
+### `rules/catalog/dangerous_actions.py`
+**R003, R004, R005 — technically dangerous activity. Pure yes/no checks.**
 
 **R003 — Debug & Replace**
-Scans `system_log` for messages containing `/h`, "debug", "value modified", etc.
-Why deterministic: either the word appears in the log or it doesn't. No judgment needed.
-Severity: CRITICAL — modifying values via debugger bypasses all change management.
+Did someone use SAP's debugger to change values directly, bypassing all validation?
+```
+system_log: "Variable value changed in debug mode (/h replace): WRBTR 50000.00 → 5000.00"
+→ CRITICAL finding
+```
+Classic fraud technique. Changes a posting amount from 50,000 to 5,000 with no audit trail.
 
-**R004 — Direct Table Modification**
-Checks if `SE16N` or `SM30` appear in `transaction_log`.
-Additionally checks if any `change_log` entries touched known sensitive tables (T001, LFBK, USR02, etc.).
-Why deterministic: presence of these tcodes is a binary fact.
-Severity: HIGH — direct table edits bypass the normal SAP validation layer.
+**R004 — Direct Table Edit**
+Did someone use SE16N or SM30 to write directly to a database table?
+```
+transaction_log: SE16N at 22:07
+change_log: table T001, WAERS field, EUR → USD
+→ HIGH finding: direct edit of company code currency table
+```
+Normal SAP transactions validate input. SE16N does not. You can corrupt anything.
 
 **R005 — OS Commands**
-Checks if `os_command_log` is non-empty. Flags every entry.
-Adds "appears destructive" to description for commands like `rm`, `chmod`, `kill`.
-Why deterministic: any OS command from SAP is already a violation regardless of what it does.
-Severity: CRITICAL.
+Did someone run shell commands from SAP?
+```
+os_command_log: "rm -rf /tmp/sapdumps/" by KZIELINSKA
+→ CRITICAL finding, flagged as destructive
+```
+Any OS access from SAP is already a violation. The "destructive" flag is added for `rm`, `chmod`, `kill` etc.
 
 ---
 
-### `rules/catalog/access_control.py` — R008, R010
+### `rules/catalog/access_control.py`
+**R008, R010 — who did what, and whether the combination is allowed.**
 
 **R008 — Self Approval**
-Compares `firefighter_user` to `ticket_requester` (case-insensitive).
-Only fires if `ticket_requester` field exists — it's optional in the dataset.
-Why deterministic: it's a string comparison.
-Severity: HIGH — segregation of duties requires the person requesting access to be different from the person who justified it.
+Did the firefighter request their own emergency access?
+```
+firefighter_user: MNOWAK
+ticket_requester: MNOWAK
+→ HIGH finding: self-approval pattern
+```
+Like a bank employee approving their own loan. The person requesting access must be different from the person who justified it.
 
 **R010 — SoD Conflict**
-Maintains a list of conflict pairs — sets of tcodes that should never appear together:
-- Vendor master change (XK02/FK02) + payment run (F110/F-53) → classic fraud enabler
-- User creation (SU01) + role assignment (PFCG) → privilege escalation
-- Goods receipt (MIGO) + invoice verification (MIRO) → procurement fraud
-Checks if BOTH sides of any pair appear in the same session's `transaction_log`.
-Why deterministic: tcode presence is a fact. No interpretation needed.
-Severity: CRITICAL.
+Did they perform two actions that should never happen together?
+```
+XK02 (changed vendor bank account number)
+F110 (ran automatic payment to that vendor)
+→ CRITICAL finding: SoD violation
+```
+This is textbook fraud — change where money goes, then send the money. We check 4 known conflict pairs:
+- Vendor change (XK02/FK02) + payment run (F110/F-53)
+- User creation (SU01) + role assignment (PFCG)
+- Goods receipt (MIGO) + invoice verification (MIRO)
+- Customer change (XD02) + billing (VF01)
 
 ---
 
-### `rules/catalog/volume_timing.py` — R006, R007, R009
+### `rules/catalog/volume_timing.py`
+**R006, R007, R009 — suspicious numbers and timing.**
 
-**R006 — Excessive Changes**
-Counts changes per table using `collections.Counter`.
-Threshold: 5 changes to a single table.
-If the reason claims "one vendor" / "single record" etc. → severity HIGH.
-Otherwise → severity MEDIUM (still flag but less certain it's wrong).
-**Important insight from FF-TRAIN-0004:** 265 changes happened in 4 minutes, all same field. Reason said "fix one vendor". The mismatch between claim and reality is the signal, not the count alone. LLM is asked to judge this context.
+**R006 — Too Many Changes**
+Did they change far more records than the reason justifies?
+```
+reason: "Fix one vendor blocked status"
+change_log: 265 rows in LFA1, same field, all in 4 minutes
+→ HIGH finding: 265 changes vs claimed single-vendor fix
+```
+Threshold: more than 5 changes to a single table triggers the rule. If reason claims "one vendor" → HIGH. If no such claim → MEDIUM (still flag but less certain).
 
-**R007 — After Hours**
-Checks if `start_time.hour` is outside 07:00–18:00 UTC.
-If outside hours → checks reason for emergency keywords (emergency, critical, urgent, outage, incident, etc.).
-If no emergency signal found → fires.
-**Bug we fixed:** "blocked" was originally in emergency keywords. FF-TRAIN-0004 reason said "Fix one vendor blocked status" — "blocked" matched as emergency keyword, rule didn't fire. Lesson: business vocabulary overlaps with emergency vocabulary. Document this as a known failure mode.
+**R007 — After Hours Without Emergency**
+Did they work at 3am without a documented emergency?
+```
+start_time: 22:06 UTC
+reason: "Fix one vendor blocked status"  ← no emergency keywords
+→ MEDIUM finding: after-hours session without emergency justification
+```
+We look for: "emergency", "critical", "urgent", "outage", "incident", "system down" etc.
+
+**Bug fixed today:** "blocked" was in the keyword list. "Fix one vendor **blocked** status" matched as emergency, rule didn't fire. Removed it — business vocabulary ("blocked vendor") overlaps with emergency vocabulary.
 
 **R009 — Session Too Long**
-Calculates `(end_time - start_time).total_seconds() / 60`.
-Fires if over 120 minutes with no re-justification documented.
-FF-TRAIN-0016 ran 5h17m — only doing read-only FB03 display transactions. Verdict: NEEDS_CORRECTION.
+Did the session run over 2 hours?
+```
+start: 07:12   end: 12:29   → 317 minutes (limit: 120)
+→ MEDIUM finding: session ran 317 minutes
+```
 
 ---
 
-### `rules/catalog/reason_quality.py` — R001, R002
+### `rules/catalog/reason_quality.py`
+**R001, R002 — is the written justification actually useful?**
 
-**R001 — Reason Quality**
-Three checks in order:
-1. Empty → fire
-2. Under 20 characters → fire
-3. Exact match against blacklist ("fix", "tbd", "production issue", "issue resolution", etc.) → fire
+**R001 — Reason Too Vague**
+```
+""                   → empty → fire
+"fix"                → 3 chars, minimum 20 → fire
+"production issue"   → exact match on blacklist → fire
+"Resolved failed payment run F110 per INC0045231"  → passes
+```
+Blacklist: "fix", "tbd", "n/a", "production issue", "issue", "issue resolution", "system error fix", "temp".
 
 **R002 — Module Mismatch**
-Maps reason keywords to expected tcode families:
-- "payment" → {F110, F-53, FBL1N, ...}
-- "vendor" → {XK02, FK02, ...}
-- "user" → {SU01, SU10, ...}
-etc.
+Does the reason claim one module but the actions touch another?
+```
+reason: "Reset user lock for HR consultant"
+transactions: FB02 (accounting), XK02 (vendor), F-53 (payment)
+→ HIGH finding: reason references user activity but FI/vendor tcodes used
+```
 
-**Algorithm:**
-1. Find ALL modules mentioned in the reason
-2. Combine ALL their expected tcodes into one allowed set
-3. Find tcodes used that are in a known module but NOT in the allowed set
-4. Exclude neutral/diagnostic tcodes (SE80, SU53, SU3, SESSION_MANAGER, /NEX)
+How it works:
+1. Find all modules mentioned in the reason ("user", "payment", "vendor"...)
+2. Build the full set of expected tcodes for ALL matched modules
+3. Find tcodes used that belong to a KNOWN module but NOT the expected set
+4. Ignore neutral tcodes: SE80, SU53, SU3, SESSION_MANAGER, /NEX
 
-**Bug we fixed:** original code picked one module keyword and flagged others as out-of-scope. FF-TRAIN-0001 reason mentions both "vendor" and "payment" — both XK02 and F110 are legitimate. Fix: collect all matched modules first, then check for violations.
+**Bug fixed today:** original code picked one module keyword and flagged the other's tcodes as out-of-scope. FF-TRAIN-0001 reason says "vendor...and...payment" — XK02 (vendor) and F110 (payment) are both legitimate. Fix: collect ALL matched modules first, then check.
 
 ---
 
 ### `rules/engine.py`
-Imports all rule functions into a list `_RULES` and runs them all against a session.
+**Runs all 10 rules and returns all findings sorted by severity.**
 
-**Key design decisions:**
-- Each rule returns `list[Finding]` not `Finding | None` — a single session can trigger R-004 multiple times (multiple dangerous tcodes)
-- `try/except` around each rule — a broken rule must never crash the pipeline. Creates an `R-ERR` finding instead
-- Sorts findings by severity (critical first) — controller sees the worst thing first
+```python
+findings = run_rules(session)
+# → [CRITICAL: R-010 SoD violation, HIGH: R-002 module mismatch, ...]
+```
+
+Two important decisions:
+- Each rule returns `list[Finding]` — one session can trigger R-004 on multiple dangerous tcodes
+- `try/except` around every rule — a broken rule logs `R-ERR` and the pipeline continues. One broken rule never kills the whole review
 
 ---
 
 ### `llm/client.py`
-Simple async HTTP client using `httpx`. Calls the OpenAI-compatible `/v1/chat/completions` endpoint.
+**Makes the actual HTTP call to the LLM API.**
 
-**Key decisions:**
-- `temperature: 0.1` — we want consistent, deterministic output. Compliance decisions shouldn't vary between runs
-- Retry logic with exponential backoff — free tier rate limits hit at 429. Waits 10s, 20s, 30s before giving up
-- 60 second timeout — LLM calls can be slow
+```python
+text = await call_llm(
+    prompt="SESSION: FF-TRAIN-0001\nREASON: ...\nFINDINGS: R-010 CRITICAL...",
+    system="You are a SAP GRC compliance reviewer..."
+)
+# → '{"verdict": "REJECT", "confidence": 0.95, "semantic_findings": [...]}'
+```
+
+Key settings:
+- `temperature: 0.1` — low randomness. Compliance verdicts should not vary between runs
+- Retries 3 times on 429 (rate limit): waits 10s, 20s, 30s
+- 60 second timeout — free tier LLMs can be slow
 
 ---
 
 ### `llm/prompts.py`
-Two things:
+**Flattens session data for the LLM, and defines the system prompt.**
 
-**`build_session_summary()`** — flattens the `SessionData` object into a compact text string for the LLM. No nested JSON. Changes become `TABLE.FIELD old→new`. Deterministic findings are included so the LLM doesn't re-discover them.
+Why flatten? Nested JSON wastes tokens and confuses models. Instead of sending the raw JSON:
+```
+# Raw (expensive, confusing):
+{"transaction_log": [{"timestamp": "2026-05-12T12:45:52Z", "tcode": "XK02"...}]}
 
-**Why flatten?** Deeply nested JSON wastes tokens and can confuse models. A flat text representation is cheaper and clearer.
+# Flattened (cheap, clear):
+TRANSACTIONS: XK02, FK02, SU53, F110, FBL1N
+CHANGES: LFBK.BANKN 1234567890→5434337882; LFBK.IBAN DE89...→DE97...
+DETERMINISTIC FINDINGS:
+  - R-010 CRITICAL: SoD violation — XK02/FK02 + F110 in same session
+```
 
-**`SYSTEM_PROMPT`** — tells the LLM its role, the rules for each verdict, which tcodes are neutral (never flag SE80, SU53 etc.), and the exact JSON output format required.
+The system prompt tells the LLM its role, the verdict rules, which tcodes are neutral (never flag SE80, SU53 etc.), and the exact JSON format to return.
 
 ---
 
 ### `llm/analyzer.py`
-Orchestrates the full LLM interaction.
+**Orchestrates the full LLM interaction — call, parse, merge, override, fallback.**
 
-**Flow:**
-1. Build session summary with deterministic findings already included
+Full flow:
+```
+1. Flatten session + deterministic findings into text
 2. Call LLM
-3. Parse JSON response (strips markdown fences if present)
-4. Convert LLM findings to `Finding` objects
-5. Merge with deterministic findings
-6. Apply hard override: if any deterministic CRITICAL finding exists → verdict is always REJECT, LLM cannot override
+3. Parse JSON response (strips markdown fences if LLM adds them)
+4. Convert LLM findings → Finding objects
+5. Merge: deterministic + LLM findings
+6. Hard override: any CRITICAL deterministic finding → verdict = REJECT always
+7. Return combined result
+```
 
-**Hard override rationale:** If R-010 (SoD violation) fires deterministically, we are 100% certain there's a violation. Letting the LLM potentially return PASS on a confirmed SoD violation would be dangerous. Deterministic certainty beats LLM judgment.
+**Hard override:** If R-010 fired, we are 100% certain. The LLM cannot override a confirmed SoD violation to PASS.
 
-**Fallback:** If LLM fails for any reason (timeout, rate limit, bad JSON), returns a verdict based purely on deterministic findings with `confidence: 0.5`. System never crashes.
+**Fallback:** LLM fails → return deterministic verdict with `confidence: 0.5`. Never crashes.
+
+**Confidence 50%** = LLM didn't respond (rate limit). In production (one session at a time) this never happens.
 
 ---
 
 ### `api/routes.py`
-Three endpoints:
+**Three HTTP endpoints. The only place the outside world talks to the system.**
 
-**`POST /review`**
-- Accepts a JSON file upload
-- Parses it → runs rule engine → calls LLM analyzer → saves to DB → returns verdict
-- Returns 400 for invalid JSON, 422 for missing required fields
+**`POST /review`** — main endpoint
+```
+Upload FF-TRAIN-0001.json
+→ parse → rules → LLM → save to DB → return JSON verdict
+```
+Returns 400 for invalid JSON, 422 for missing required fields.
 
-**`PATCH /sessions/{session_id}/decision`**
-- Controller clicks PASS/REJECT/SEND_BACK
-- Saves their decision to the database
-- Returns 404 if session not found
+**`PATCH /sessions/{session_id}/decision`** — controller clicks a button
+```
+PATCH /sessions/FF-TRAIN-0001/decision
+Body: {"decision": "REJECT"}
+→ saves to database, returns 404 if session not found
+```
 
-**`GET /sessions`**
-- Returns all reviewed sessions ordered by date
-- Used by the frontend to populate the history table
-
-**CORS is open (`allow_origins=["*"]`)** — fine for local development. In production you'd restrict this to your frontend domain.
+**`GET /sessions`** — history table
+```
+GET /sessions
+→ all reviewed sessions, newest first
+```
 
 ---
 
-### `storage/`
+### `storage/database.py`
+**Sets up SQLite. Creates the database file and folder on first run.**
 
-**`database.py`** — SQLAlchemy engine pointing at `backend/data/verdicts.db`. Creates the file and directory automatically. `init_db()` called at FastAPI startup.
+```python
+DB_PATH = backend/data/verdicts.db   # auto-created if missing
+```
 
-**`models.py`** — one table: `verdicts`. Stores session_id (primary key), verdict, confidence, findings as JSON string, suggested_correction as JSON string, controller_decision, controller_note, timestamps.
+`init_db()` runs at FastAPI startup and creates the `verdicts` table if it doesn't exist. You never run migrations manually.
 
-**Why store findings as JSON string?** SQLite doesn't have a native JSON array type. Serializing to text is simpler than creating a separate findings table, and we never need to query by individual finding fields.
+---
 
-**`repository.py`** — three functions: `save_verdict()`, `get_all_sessions()`, `update_decision()`. Nothing outside this file touches the database directly. This is the repository pattern — if you ever switch to Postgres, you change this file and nothing else.
+### `storage/models.py`
+**Defines what the database table looks like.**
+
+One table: `verdicts`. Columns:
+```
+session_id              (primary key)
+verdict                 ("PASS" / "REJECT" / "NEEDS_CORRECTION")
+confidence              (0.0 - 1.0 float)
+findings_json           (all findings as JSON string)
+suggested_correction_json  (JSON string or null)
+controller_decision     ("PASS" / "REJECT" / "SEND_BACK" or null)
+controller_note         (optional text)
+created_at / updated_at (auto timestamps)
+```
+
+Findings stored as a JSON string because SQLite has no native array type and we never query by individual finding fields.
+
+---
+
+### `storage/repository.py`
+**The only file that touches the database. Everyone else calls these three functions.**
+
+```python
+save_verdict(result)               # after every review
+get_all_sessions()                 # GET /sessions endpoint
+update_decision(id, decision)      # controller clicks button
+```
+
+If you switch from SQLite to Postgres tomorrow, you change `database.py` and this file. Nothing else.
 
 ---
 
 ### `frontend/index.html`
-Single HTML file, no build step, no Node, no npm. Opens directly in browser.
+**Entire UI in one HTML file. Open directly in browser. No Node, no build step.**
 
-**Design:** Dark navy (#0a1628) + blue (#1e6fff) matching Seargin branding. Sora font for UI, JetBrains Mono for all code/IDs/evidence. Grid background pattern, glow orbs, glassmorphism cards.
+Three sections:
+1. **Upload zone** — click or drag a session JSON. Shows filename after selection
+2. **Result panel** — appears after review:
+   - Verdict banner (green=PASS, red=REJECT, yellow=NEEDS_CORRECTION)
+   - PASS / REJECT / SEND BACK buttons for controller
+   - Findings list (color-coded by severity, with rule ID badge, description, raw evidence)
+   - Correction message card (only shown for NEEDS_CORRECTION)
+3. **History table** — all previously reviewed sessions with controller decisions
 
-**Three sections:**
-1. Upload zone — click or drag JSON file
-2. Result panel — verdict banner, decision buttons, findings list, correction card, session info
-3. History table — all previously reviewed sessions with their controller decisions
+Design: dark navy + blue (Seargin branding), Sora font, JetBrains Mono for all code/log data, subtle grid background, glassmorphism cards, animated hover effects.
 
-**JavaScript:** Vanilla JS, no framework. Three async functions: `handleFile()`, `recordDecision()`, `loadSessions()`. Calls the FastAPI backend on `localhost:8000`.
+JavaScript: vanilla, no framework. Three async functions that call the backend on `localhost:8000`.
 
 ---
 
 ## Key Design Decisions (For Interview)
 
-### Why deterministic rules run before LLM?
-The LLM receives the rule findings as context in its prompt. This way the LLM focuses only on what deterministic logic can't answer — semantic judgment. Running in parallel would waste tokens re-discovering things we already know for certain.
+**Why deterministic rules before LLM?**
+The LLM receives rule findings as context. It focuses only on what deterministic logic can't judge — semantic meaning. Running them in parallel wastes tokens re-discovering known facts.
 
-### Why not use the OpenAI SDK?
-We call the OpenAI-compatible HTTP endpoint directly via `httpx`. Provider-agnostic — same code works with Anthropic, OpenRouter, Gemini, or local Ollama by changing one environment variable.
+**Why not use the OpenAI SDK?**
+Direct HTTP via `httpx`. Provider-agnostic — switch from OpenRouter to Anthropic to Ollama by changing one env variable.
 
-### Why SQLite not Postgres?
-Zero infrastructure. SQLite ships with Python, creates itself on first run, needs no server. Perfectly sufficient for this use case. Postgres would add complexity with zero benefit.
+**Why SQLite not Postgres?**
+Zero infrastructure. Creates itself on first run. Perfectly sufficient here. Postgres would add complexity with zero benefit.
 
-### Why dataclasses for models, Pydantic for API?
-Dataclasses = internal data, no serialization overhead, pure Python.
-Pydantic = API boundary, handles validation and JSON serialization automatically.
-Mixing them would couple rule logic to HTTP concerns.
+**Why dataclasses internally, Pydantic at the API boundary?**
+Dataclasses are pure Python — fast, no overhead, no coupling to HTTP. Pydantic handles JSON validation and serialization at the boundary where it's actually needed.
 
-### Why does R-010 always override the LLM verdict?
-SoD violations are binary facts. XK02 + F110 in the same session IS a violation, period. No semantic interpretation can change that. Allowing the LLM to return PASS on a confirmed SoD violation would defeat the purpose of having deterministic checks.
+**Why does R-010 always override the LLM?**
+SoD violations are binary facts. XK02 + F110 in same session IS a violation. No LLM interpretation can change that. Deterministic certainty beats LLM judgment for clear-cut cases.
 
 ---
 
-## Known Issues / Bugs Found Today
+## Known Issues Found Today
 
-1. **R-007 false negative** — "blocked" was in emergency keywords. Business vocabulary ("vendor blocked status") overlapped with emergency vocabulary. Fixed by removing it.
+**Bug 1 — R-007 false negative**
+"blocked" was in emergency keywords. "Fix one vendor **blocked** status" matched. Rule didn't fire.
+Fixed: removed "blocked". Lesson: business terminology overlaps with emergency vocabulary.
 
-2. **R-002 false positive** — original logic picked one module keyword and flagged others as out-of-scope. Sessions with multi-module reasons (vendor + payment) triggered false findings. Fixed by collecting ALL matched modules first.
+**Bug 2 — R-002 false positive**
+Original code picked one module keyword and flagged the other's tcodes as out-of-scope.
+Fixed: collect all matched modules first, combine all expected tcodes, then check.
 
-3. **LLM false positive on SE80** — LLM flagged SE80 (Object Navigator) as suspicious on a clean session. Fixed by adding neutral tcode list to system prompt.
+**Bug 3 — LLM false positive on SE80**
+LLM flagged SE80 (Object Navigator) as suspicious on a clean session.
+Fixed: added neutral tcode list to system prompt.
 
-4. **Confidence 50%** — not a real confidence score. Means LLM rate-limited and fell back to deterministic verdict. Real confidence comes from LLM (typically 0.85-0.95).
+**Bug 4 — Confidence always 50% during development**
+Not a real bug. Means LLM rate-limited and fell back. In production (one session at a time) never happens.
 
 ---
 
-## What's Left (Tomorrow)
+## What's Left Tomorrow
 
-- [ ] `eval/run_eval.py` — run all 75 sessions, produce confusion matrix
+- [ ] `eval/run_eval.py` — run all 75 sessions, confusion matrix + per-rule precision/recall
 - [ ] `Makefile` — `make run`, `make test`, `make eval`, `make clean`
-- [ ] `Dockerfile` for backend
-- [ ] `Dockerfile` for frontend (nginx)
+- [ ] `Dockerfile` for backend and frontend
 - [ ] `docker-compose.yml`
-- [ ] Additional rules beyond baseline R001-R010 (worth 15% of grade)
-- [ ] Submission README (architecture diagram, rule rationale, failure modes, cost estimate)
+- [ ] Additional rules beyond R001-R010 (worth 15% of grade)
+- [ ] Submission README with architecture diagram, rule rationale, failure modes, cost estimate
 - [ ] `.github/workflows/ci.yml` for CI/CD bonus
 
 ## Additional Rules to Think About Tonight
 
-The baseline gives us R001-R010. We need to propose more. Think about:
-- Sensitive financial fields changed (IBAN, bank account number) — we saw this in FF-TRAIN-0001
-- Session with zero changes but reason implies changes were needed
-- Firefighter ID module mismatch (FF_FI_01 doing BASIS work)
-- Multiple logoffs mid-session (/NEX appearing multiple times) — suggests session hand-off
-- Change timestamps outside session window
-- Same vendor modified multiple times suggesting iterative testing not a fix
+- **Sensitive financial field changed** — IBAN or bank account modified (LFBK table) without a payment running. Currently only caught if R-010 fires too.
+- **Zero changes but reason implies fix** — reason says "fixed the issue" but change_log is empty.
+- **Firefighter ID module mismatch** — FF_FI_01 (Finance) doing BASIS work (SU01, SM21).
+- **Multiple logoffs mid-session** — /NEX appearing more than once suggests session handed off.
+- **Change timestamp outside session window** — change_log entry before start_time or after end_time.
+- **Same key modified multiple times** — same vendor number changed 3 times suggests testing not fixing.
 
 ---
 
-## Cost Estimate (For README)
+## Cost Estimate
 
-Using `google/gemma-4-31b-it:free` on OpenRouter:
-- **Current cost: $0.00** — free tier model
-- If switching to Claude Haiku: ~$0.001 per session × 75 sessions = **~$0.075 total**
-- If switching to Claude Sonnet: ~$0.01 per session × 75 sessions = **~$0.75 total**
+Using `google/gemma-4-31b-it:free` on OpenRouter: **$0.00**
 
-The system is designed to use the cheapest model for triage. A model routing strategy (Haiku for clear-cut cases, Sonnet for borderline) would keep costs under $0.005 per session in production.
+If switching to paid models:
+- Claude Haiku: ~$0.001/session × 75 = ~$0.075 total
+- Claude Sonnet: ~$0.01/session × 75 = ~$0.75 total
+
+Model routing strategy (cheap model for clear-cut cases, expensive for borderline) would keep production cost under $0.005 per session.
