@@ -11,7 +11,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    llm_api_key: str
+    llm_api_key: str = ""
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_model: str = "google/gemini-2.0-flash-exp:free"
     llm_max_tokens: int = 1000
