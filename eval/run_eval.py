@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 
+ROOT_DIR = Path(__file__).parent.parent
+
 # Allow imports from backend/src
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend" / "src"))
 
@@ -101,7 +103,7 @@ def main():
     if args.output:
         output_path = Path(args.output)
     else:
-        output_path = Path("eval") / f"predictions_{sessions_dir.parent.name}.jsonl"
+        output_path = ROOT_DIR / "eval" / f"predictions_{sessions_dir.parent.name}.jsonl"
 
     asyncio.run(run_eval(sessions_dir, output_path, args.delay))
 
