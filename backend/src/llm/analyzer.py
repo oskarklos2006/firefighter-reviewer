@@ -40,7 +40,6 @@ async def analyze_session(
 
     try:
         raw = await call_llm(summary, system=SYSTEM_PROMPT)
-        print("LLM RAW RESPONSE:", repr(raw))
         parsed = _parse_llm_response(raw)
     except Exception as e:
         print("LLM ERROR:", str(e))

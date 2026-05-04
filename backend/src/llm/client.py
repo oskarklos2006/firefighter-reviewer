@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio
 import httpx
-from src.config import settings
+from config import settings
 
 
 async def call_llm(prompt: str, system: str = "") -> str:

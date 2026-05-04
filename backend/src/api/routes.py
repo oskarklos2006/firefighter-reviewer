@@ -9,6 +9,7 @@ from rules.engine import run_rules
 from llm.analyzer import analyze_session
 from storage.repository import save_verdict, get_all_sessions, update_decision
 from storage.database import init_db
+from pipeline import review_session_data
 
 
 app = FastAPI(title="Firefighter Log Reviewer", version="0.1.0")
@@ -33,10 +34,6 @@ async def health():
 
 @app.post("/review")
 async def review_session(file: UploadFile = File(...)):
-    """
-    Accept a session JSON file, run full review pipeline,
-    return structured verdict.
-    """
     try:
         content = await file.read()
         raw = json.loads(content)
@@ -44,32 +41,9 @@ async def review_session(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Invalid JSON file")
 
     try:
-        session = parse_session(raw)
+        response = await review_session_data(raw)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
-
-    deterministic_findings = run_rules(session)
-    result = await analyze_session(session, deterministic_findings)
-
-    # Serialize findings for storage and response
-    findings_serialized = [
-        {
-            "rule_id": f.rule_id,
-            "severity": f.severity.value,
-            "location": f.location,
-            "description": f.description,
-            "evidence": f.evidence,
-        }
-        for f in result["findings"]
-    ]
-
-    response = {
-        "session_id": session.session_id,
-        "verdict": result["verdict"],
-        "confidence": result["confidence"],
-        "findings": findings_serialized,
-        "suggested_correction": result.get("suggested_correction"),
-    }
 
     save_verdict(response)
     return response
