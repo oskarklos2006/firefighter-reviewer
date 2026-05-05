@@ -5,7 +5,8 @@ from rules.models import Finding, Severity, SessionData, Verdict
 from llm.client import call_llm
 from llm.prompts import build_session_summary, SYSTEM_PROMPT
 
-
+# Rules that always mean REJECT with 100% certainty — skip LLM entirely
+_ALWAYS_REJECT_RULES = {"R-003", "R-004", "R-005", "R-008", "R-010"}
 def _parse_llm_response(raw: str) -> dict:
     """Extract JSON from LLM response, stripping markdown fences if present."""
     clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
@@ -32,10 +33,17 @@ async def analyze_session(
     session: SessionData,
     deterministic_findings: list[Finding],
 ) -> dict:
-    """
-    Send session to LLM with deterministic findings as context.
-    Returns merged verdict, all findings, and suggested correction.
-    """
+    # Skip LLM if deterministic rules already give certain REJECT
+    triggered_rule_ids = {f.rule_id for f in deterministic_findings}
+    if triggered_rule_ids & _ALWAYS_REJECT_RULES:
+        return {
+            "session_id": session.session_id,
+            "verdict": Verdict.REJECT.value,
+            "confidence": 0.99,
+            "findings": deterministic_findings,
+            "suggested_correction": None,
+        }
+
     summary = build_session_summary(session, deterministic_findings)
 
     try:

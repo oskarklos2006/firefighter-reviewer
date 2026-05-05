@@ -2,24 +2,12 @@ from rules.catalog.dangerous_actions import check_r003, check_r004, check_r005
 from rules.catalog.access_control import check_r008, check_r010
 from rules.catalog.volume_timing import check_r006, check_r007, check_r009
 from rules.catalog.reason_quality import check_r001, check_r002
-from rules.catalog.extended import check_r011, check_r012, check_r013, check_r014
+from rules.catalog.extended import check_r011, check_r012, check_r013, check_r014, check_r015, check_r016
 from rules.models import Finding, SessionData
 
 _RULES = [
-    check_r001,
-    check_r002,
-    check_r003,
-    check_r004,
-    check_r005,
-    check_r006,
-    check_r007,
-    check_r008,
-    check_r009,
-    check_r010,
-    check_r011,
-    check_r012,
-    check_r013,
-    check_r014,
+    check_r001, check_r002, check_r003, check_r004, check_r005,
+    check_r006, check_r007, check_r008, check_r009, check_r010,
 ]
 
 

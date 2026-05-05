@@ -23,29 +23,36 @@ _TRANSPORT_TCODES = {"STMS", "STMS_IMPORT", "SE09", "SE10", "CG3Y", "CG3Z"}
 
 def check_r011(session: SessionData) -> list[Finding]:
     """Custom ABAP program (Z*/Y* namespace) executed in firefighter session."""
-    findings = []
     custom_tcodes = [
         e.tcode for e in session.transaction_log
         if e.tcode.startswith(_CUSTOM_PROGRAM_PREFIXES)
-        and len(e.tcode) > 1  # exclude /NEX etc
+        and len(e.tcode) > 1
     ]
 
     if not custom_tcodes:
         return []
 
-    findings.append(Finding(
+    # If the custom program is explicitly mentioned in the reason, it's justified
+    reason_lower = session.reason_code.lower()
+    unjustified = [
+        t for t in custom_tcodes
+        if t.lower() not in reason_lower
+    ]
+
+    if not unjustified:
+        return []
+
+    return [Finding(
         rule_id="R-011",
         severity=Severity.HIGH,
         location="transaction_log",
         description=(
-            "Custom ABAP program(s) executed during firefighter session. "
-            "Programs in the Z/Y namespace are customer-developed and not "
-            "subject to standard SAP audit controls. Execution must be "
-            "explicitly justified in the reason code."
+            "Custom ABAP program(s) executed during firefighter session "
+            "without explicit justification in the reason code. "
+            "Programs in the Z/Y namespace bypass standard SAP audit controls."
         ),
-        evidence=f"Custom tcodes used: {', '.join(sorted(set(custom_tcodes)))}",
-    ))
-    return findings
+        evidence=f"Unjustified custom tcodes: {', '.join(sorted(set(unjustified)))}",
+    )]
 
 
 def check_r012(session: SessionData) -> list[Finding]:
@@ -119,4 +126,64 @@ def check_r014(session: SessionData) -> list[Finding]:
             "transport approval and quality gate process."
         ),
         evidence=f"Transport tcodes: {', '.join(sorted(transport_tcodes_used))}",
+    )]
+
+# R-015: ABAP Editor in production
+_ABAP_EDITOR_TCODES = {"SE38", "SE37", "SE80"}
+
+# R-016: Bank account or IBAN modified
+_BANK_TABLES = {"LFBK"}
+_BANK_FIELDS = {"BANKN", "IBAN", "BKONT", "SWIFT"}
+
+
+def check_r015(session: SessionData) -> list[Finding]:
+    """ABAP Editor used in production firefighter session."""
+    abap_tcodes_used = {
+        e.tcode for e in session.transaction_log
+        if e.tcode in _ABAP_EDITOR_TCODES
+    }
+
+    # SE80 is neutral for navigation but SE38/SE37 are always suspicious
+    dangerous = abap_tcodes_used - {"SE80"}
+    if not dangerous:
+        return []
+
+    return [Finding(
+        rule_id="R-015",
+        severity=Severity.HIGH,
+        location="transaction_log",
+        description=(
+            "ABAP Editor executed in production firefighter session. "
+            "Editing ABAP code directly in production bypasses the entire "
+            "development, testing and transport approval process."
+        ),
+        evidence=f"ABAP editor tcodes used: {', '.join(sorted(dangerous))}",
+    )]
+
+
+def check_r016(session: SessionData) -> list[Finding]:
+    """Vendor bank account or IBAN modified."""
+    bank_changes = [
+        e for e in session.change_log
+        if e.table in _BANK_TABLES and e.field in _BANK_FIELDS
+    ]
+
+    if not bank_changes:
+        return []
+
+    evidence = "; ".join(
+        f"{e.table}.{e.field} {e.old_value}→{e.new_value}"
+        for e in bank_changes
+    )
+
+    return [Finding(
+        rule_id="R-016",
+        severity=Severity.HIGH,
+        location="change_log",
+        description=(
+            "Vendor bank account details modified during firefighter session. "
+            "Changing bank account numbers or IBANs is a known fraud vector "
+            "and requires dual approval outside of emergency access."
+        ),
+        evidence=evidence,
     )]
