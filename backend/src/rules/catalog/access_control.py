@@ -61,7 +61,7 @@ def check_r010(session: SessionData) -> list[Finding]:
                     "were both run in the same session by the same user."
                 ),
                 evidence=(
-                    f"Modify side: {', '.join(sorted(modify_hits))} — "
+                    f"Modify side: {', '.join(sorted(modify_hits))} - "
                     f"Execute side: {', '.join(sorted(execute_hits))}"
                 ),
             ))
