@@ -6,10 +6,9 @@ services:
       - LLM_BASE_URL=${LLM_BASE_URL}
       - LLM_MODEL=${LLM_MODEL}
       - LLM_MAX_TOKENS=${LLM_MAX_TOKENS}
-    ports:
-      - "8000:8000"
     volumes:
       - ./backend/data:/app/data
+    # No ports — backend hidden from outside
 
   frontend:
     build: ./frontend
