@@ -34,14 +34,16 @@ def _findings_from_llm(raw_findings: list[dict]) -> list[Finding]:
 async def analyze_session(
     session: SessionData,
     deterministic_findings: list[Finding],
+    force_llm: bool = False,
 ) -> dict:
     # Skip LLM if deterministic rules already give certain REJECT
+    # unless force_llm is True
     triggered_rule_ids = {f.rule_id for f in deterministic_findings}
-    if triggered_rule_ids & _ALWAYS_REJECT_RULES:
+    if not force_llm and triggered_rule_ids & _ALWAYS_REJECT_RULES:
         return {
             "session_id": session.session_id,
             "verdict": Verdict.REJECT.value,
-            "confidence": 0.99,
+            "confidence": 1.0,
             "findings": deterministic_findings,
             "suggested_correction": None,
         }
@@ -56,7 +58,12 @@ async def analyze_session(
         return _fallback_verdict(deterministic_findings, str(e))
 
     llm_findings = _findings_from_llm(parsed.get("semantic_findings", []))
-    all_findings = deterministic_findings + llm_findings
+    seen_rules = {f.rule_id for f in deterministic_findings}
+    llm_findings_deduped = [
+        f for f in llm_findings
+        if f.rule_id not in seen_rules
+    ]
+    all_findings = deterministic_findings + llm_findings_deduped
 
     verdict = parsed.get("verdict", _derive_verdict(deterministic_findings))
     confidence = float(parsed.get("confidence", 0.5))

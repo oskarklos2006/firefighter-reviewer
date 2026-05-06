@@ -73,7 +73,7 @@ to determine the verdict.
 Respond in this exact JSON format with no markdown, no explanation outside the JSON:
 {
   "verdict": "PASS" | "REJECT" | "NEEDS_CORRECTION",
-  "confidence": 0.0-1.0,
+  "confidence": 0.0-0.99,
   "semantic_findings": [
     {
       "rule_id": "R-LLM-001",

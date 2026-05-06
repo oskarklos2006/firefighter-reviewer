@@ -1,12 +1,9 @@
 from __future__ import annotations
 import json
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-from rules.parser import parse_session
-from rules.engine import run_rules
-from llm.analyzer import analyze_session
 from storage.repository import save_verdict, get_all_sessions, update_decision
 from storage.database import init_db
 from pipeline import review_session_data
@@ -33,7 +30,10 @@ async def health():
 
 
 @app.post("/review")
-async def review_session(file: UploadFile = File(...)):
+async def review_session(
+    file: UploadFile = File(...),
+    force_llm: bool = Query(default=False)
+):
     try:
         content = await file.read()
         raw = json.loads(content)
@@ -41,7 +41,7 @@ async def review_session(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Invalid JSON file")
 
     try:
-        response = await review_session_data(raw)
+        response = await review_session_data(raw, force_llm=force_llm)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -50,13 +50,12 @@ async def review_session(file: UploadFile = File(...)):
 
 
 class DecisionUpdate(BaseModel):
-    decision: str  # "PASS", "REJECT", "SEND_BACK"
+    decision: str
     controller_note: Optional[str] = None
 
 
 @app.patch("/sessions/{session_id}/decision")
 async def record_decision(session_id: str, body: DecisionUpdate):
-    """Record controller's final decision on a session."""
     allowed = {"PASS", "REJECT", "SEND_BACK"}
     if body.decision not in allowed:
         raise HTTPException(
@@ -71,5 +70,4 @@ async def record_decision(session_id: str, body: DecisionUpdate):
 
 @app.get("/sessions")
 async def list_sessions():
-    """Return all reviewed sessions for the controller dashboard."""
     return get_all_sessions()
