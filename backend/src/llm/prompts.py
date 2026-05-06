@@ -1,5 +1,6 @@
 from __future__ import annotations
 from rules.models import Finding, SessionData
+import random
 
 
 def build_session_summary(session: SessionData, findings: list[Finding]) -> str:
@@ -18,15 +19,25 @@ def build_session_summary(session: SessionData, findings: list[Finding]) -> str:
     ]
     tcodes = ", ".join(meaningful_tcodes) or "none"
 
-    # Truncate change log if excessive — first 10 entries representative enough
-    change_entries = session.change_log[:10]
-    changes = "; ".join(
-        f"{e.table}.{e.field} {e.old_value}→{e.new_value}"
-        for e in change_entries
-    )
+    # Sample change log to defeat position-based hiding
+    # Takes first 5, last 3, and random from middle
     if len(session.change_log) > 10:
-        changes += f" ... (+{len(session.change_log) - 10} more)"
-    changes = changes or "none"
+        middle = session.change_log[5:-3]
+        sample = (
+                session.change_log[:5] +
+                (random.sample(middle, min(2, len(middle))) if middle else []) +
+                session.change_log[-3:]
+        )
+        changes = "; ".join(
+            f"{e.table}.{e.field} {e.old_value}→{e.new_value}"
+            for e in sample
+        )
+        changes += f" ... ({len(session.change_log)} total entries)"
+    else:
+        changes = "; ".join(
+            f"{e.table}.{e.field} {e.old_value}→{e.new_value}"
+            for e in session.change_log
+        ) or "none"
 
     # Only include non-empty logs
     os_cmds = "; ".join(e.command for e in session.os_command_log) or "none"

@@ -80,9 +80,12 @@ async def analyze_session(
 
     llm_findings = _findings_from_llm(parsed.get("semantic_findings", []))
     seen_rules = {f.rule_id for f in deterministic_findings}
+    seen_locations = {f.location for f in deterministic_findings}
+
     llm_findings_deduped = [
         f for f in llm_findings
         if f.rule_id not in seen_rules
+           and f.location not in seen_locations
     ]
     _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     all_findings = sorted(
