@@ -12,9 +12,27 @@ logger = logging.getLogger(__name__)
 # R-016 not included — bank change alone needs LLM context judgment
 _ALWAYS_REJECT_RULES = {"R-003", "R-004", "R-005", "R-008", "R-010"}
 
+
 def _parse_llm_response(raw: str) -> dict:
     """Extract JSON from LLM response, stripping markdown fences if present."""
     clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+
+    # Extract only the first complete JSON object
+    # handles cases where LLM returns multiple JSON blocks
+    brace_count = 0
+    end_index = 0
+    for i, char in enumerate(clean):
+        if char == '{':
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+            if brace_count == 0:
+                end_index = i + 1
+                break
+
+    if end_index > 0:
+        clean = clean[:end_index]
+
     return json.loads(clean)
 
 
