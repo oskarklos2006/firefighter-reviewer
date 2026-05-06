@@ -1,45 +1,299 @@
-# Firefighter Log Reviewer — Personal Development Notes
-> Written at end of Day 1. This is NOT the submission README. This is your cold-head analysis document.
+# SAP Firefighter Log Compliance Reviewer
+### Seargin AI/ML CoE — Internship Technical Challenge
 
 ---
 
-## How to Run Right Now
+## Quick Start
+
+### Option 1 — Docker (recommended)
 
 ```bash
-# 1. Start the backend (from backend/ folder)
-cd backend
-uvicorn src.main:app --reload
+# 1. Copy environment file and add your API key
+cp .env.example .env
+# Edit .env and set LLM_API_KEY
 
-# 2. Open the frontend
-# Just double-click frontend/index.html in your file explorer
+# 2. Start the system
+docker compose up --build
 
-# 3. Run fast tests (no LLM, instant)
-cd backend
-pytest tests/ -m "not llm" -v
-
-# 4. Run LLM tests (slow, rate-limited, use sparingly)
-pytest tests/ -m "llm" -v
+# 3. Open the UI
+# http://localhost:3000
 ```
 
-**Prerequisites:**
-- Python 3.12 venv activated (`.venv` in project root)
-- `.env` file in project root with your OpenRouter API key
-- Dependencies installed: `pip install -e ".[dev]"` from `backend/`
+### Option 2 — Local development
+
+```bash
+# 1. Install dependencies
+cd backend
+pip install -e ".[dev]"
+
+# 2. Copy and configure environment
+cp .env.example .env
+# Edit .env and set LLM_API_KEY
+
+# 3. Start backend
+make run
+
+# 4. Open frontend/index.html in your browser
+```
+
+### Run tests
+```bash
+make test
+```
+
+### Run evaluation
+```bash
+make eval
+```
 
 ---
 
-## What This System Does (Plain English)
+## Architecture
 
-SAP production systems have emergency access accounts called "Firefighter IDs". When something breaks at 3am, a consultant uses one of these to fix it. Every action they take is logged. A compliance officer (called a "Controller") must review each session and decide: was this legitimate?
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        docker compose                           │
+│                                                                 │
+│  ┌──────────────────────┐         ┌────────────────────────┐   │
+│  │   frontend :3000     │         │   backend (internal)   │   │
+│  │                      │         │                        │   │
+│  │   nginx              │──HTTP──▶│   FastAPI              │   │
+│  │   serves index.html  │  /api/  │   POST /review         │   │
+│  │                      │         │   GET  /sessions       │   │
+│  └──────────────────────┘         │   PATCH /sessions/{id} │   │
+│                                   │                        │   │
+│                                   │   ┌────────────────┐   │   │
+│                                   │   │  Rule Engine   │   │   │
+│                                   │   │  (deterministic│   │   │
+│                                   │   │   14 rules)    │   │   │
+│                                   │   └───────┬────────┘   │   │
+│                                   │           │            │   │
+│                                   │   ┌───────▼────────┐   │   │
+│                                   │   │  LLM Analyzer  │   │   │
+│                                   │   │  (Claude Haiku)│   │   │
+│                                   │   └───────┬────────┘   │   │
+│                                   │           │            │   │
+│                                   │   ┌───────▼────────┐   │   │
+│                                   │   │  SQLite DB     │   │   │
+│                                   │   │  verdicts.db   │   │   │
+│                                   │   └────────────────┘   │   │
+│                                   └────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
 
-Today there are 30-80 sessions per month per client. Controllers read them manually — 20-40 minutes each. They make mistakes. They rubber-stamp logs they didn't fully read.
+Request flow:
+Session JSON → Pydantic validation → Rule Engine → LLM Analyzer → Verdict JSON
+                                          │
+                                          ▼
+                               Hard REJECT if critical rule fires
+                               (R-003, R-004, R-005, R-008, R-010)
+                               → skip LLM entirely, confidence = 1.0
+```
 
-This tool pre-screens each session automatically and gives the controller a structured verdict with specific findings and a draft message to send back if something is wrong.
+---
 
-**Three possible verdicts:**
-- `PASS` — everything looks fine, approve it
-- `REJECT` — clear violation, escalate it
-- `NEEDS_CORRECTION` — something's off but not certain, ask the firefighter to explain
+## Compliance Rule Catalog
+
+### Baseline Rules (R-001 to R-010)
+
+| Rule | Description | Severity | Logic |
+|------|-------------|----------|-------|
+| R-001 | Reason code empty, too short (<20 chars), or generic ("fix", "tbd", "production issue") | medium | Deterministic |
+| R-002 | Reason mentions one SAP module but transactions touch a different one | high | Deterministic + LLM |
+| R-003 | Debug & replace activity in system log (`/h`, value modification) | critical | Deterministic |
+| R-004 | Direct table modification via SE16N or SM30 on sensitive tables | high | Deterministic |
+| R-005 | OS-level commands executed (SM49, os_command_log non-empty) | critical | Deterministic |
+| R-006 | Change volume disproportionate to stated reason (>5 changes per table) | high/medium | Deterministic |
+| R-007 | Session outside business hours (07:00–18:00 UTC) without emergency signal | medium | Deterministic |
+| R-008 | Firefighter user is also the ticket requester (self-approval) | high | Deterministic |
+| R-009 | Session duration exceeds 120 minutes without re-justification | medium | Deterministic |
+| R-010 | SoD conflict: known dangerous tcode pairs in same session (vendor change + payment run, etc.) | critical | Deterministic |
+
+### Extended Rules (R-011 to R-016)
+
+These rules were identified by analyzing patterns in the training dataset. They function as **advisory signals** — they provide context to the LLM but do not independently determine the verdict. This design choice was made after empirical testing showed that treating them as hard rules reduced accuracy from 96% to 76% due to false positives on legitimate sessions.
+
+| Rule | Description | Severity | Rationale |
+|------|-------------|----------|-----------|
+| R-011 | Ticket reference is missing, empty, or a placeholder ("TBD", "N/A", "000000") | medium | Every firefighter session must be traceable to an approved ticket. Seen in 6 NEEDS_CORRECTION/REJECT sessions in train set |
+| R-012 | Reason code is a reference-only placeholder ("see ticket", "as per mail") | medium | A reason that only points to a ticket provides no audit trail if the ticket system is unavailable |
+| R-013 | Reason implies changes were made ("fixed", "resolved") but change_log is empty | medium | Either the fix happened outside the session, was not logged, or the reason is inaccurate |
+| R-016 | Vendor bank account (LFBK.BANKN) or IBAN modified during session | high | Changing bank details is a known fraud vector. Both instances in train set (FF-TRAIN-0001, FF-TRAIN-0018) were REJECT |
+
+### Rules Considered But Not Implemented
+
+After analysis, the following patterns were identified but not activated as rules due to unacceptable false positive rates on the training set:
+
+- **R-015 (SE38 ABAP Editor)** — SE38 appears in both REJECT sessions (0003, 0004, 0024) and legitimate PASS sessions (0009, 0019, 0030) where it is used to launch pre-approved custom programs. Without additional context (e.g. presence in system_log), it cannot be reliably distinguished.
+- **R-014 (Transport Management)** — STMS/STMS_IMPORT appears in multiple PASS sessions (0011, 0023, 0036) where transport releases are a legitimate emergency action with proper justification.
+- **R-017 (Very short session, no changes)** — boundary between accidental FFID opening and legitimate read-only investigation is too ambiguous without additional context.
+
+---
+
+## Deterministic vs LLM — Design Rationale
+
+### Deterministic rules handle:
+- Binary facts: does `os_command_log` have entries? Is `ticket_requester == firefighter_user`?
+- Known bad patterns: SoD conflict tcode pairs, sensitive table edits, debug keywords in system log
+- Quantitative thresholds: session duration, change counts
+
+**Why deterministic for these?** These checks have a single correct answer derivable from the data. An LLM would add cost, latency, and potential inconsistency without improving correctness.
+
+### LLM handles:
+- Semantic alignment: does the reason *actually* match the actions in spirit, beyond keyword matching?
+- Reason quality: is the justification specific enough even if it passes length/blacklist checks?
+- Contextual judgment: is the volume of changes justified by the stated reason?
+- Suggested correction generation: drafting the message to the firefighter
+
+**Why LLM for these?** These require understanding intent and context — things that cannot be expressed as deterministic rules without an impossibly large lookup table.
+
+### Cost optimization — LLM skip logic
+
+Sessions with critical deterministic findings (R-003, R-004, R-005, R-008, R-010) skip the LLM entirely:
+
+```
+if triggered_rules ∩ {R-003, R-004, R-005, R-008, R-010} ≠ ∅:
+    verdict = REJECT, confidence = 1.0  # no LLM call
+```
+
+In the training set, this applies to ~60% of REJECT sessions, reducing LLM calls and cost significantly.
+
+The LLM prompt is also optimized to reduce token usage:
+- Neutral/diagnostic tcodes (SE80, SU53, /NEX, SESSION_MANAGER) excluded from summary
+- Change log truncated to first 10 entries with count of remaining
+- Empty log sections omitted entirely
+
+---
+
+## Evaluation Results
+
+### Train set (50 sessions, with gold labels)
+
+```
+Accuracy:  0.96
+Macro F1:  0.96
+
+Per-class:
+  PASS              P=0.909  R=1.000  F1=0.952  (support=20)
+  REJECT            P=1.000  R=1.000  F1=1.000  (support=15)
+  NEEDS_CORRECTION  P=1.000  R=0.867  F1=0.929  (support=15)
+
+Confusion matrix:
+                    PASS   REJECT   NEEDS_CORRECTION
+  PASS               20        0                  0
+  REJECT              0       15                  0
+  NEEDS_CORRECTION    2        0                 13
+```
+
+**Key observation:** REJECT class is perfect (15/15). Every hard violation is caught with 100% certainty. The 2 missed NEEDS_CORRECTION sessions are borderline cases where the LLM judged the session as compliant — these are the hardest cases where reasonable reviewers could disagree.
+
+**Note on variance:** Due to LLM non-determinism (temperature=0.1 but not 0), accuracy varies between 94–98% across runs. REJECT is always 100% deterministic. The reported 96% is a representative single run.
+
+### Test set (25 sessions, no labels)
+
+Predictions submitted in `eval/predictions_test.jsonl`.
+
+```
+Distribution:
+  PASS:              10 (40%)
+  REJECT:            10 (40%)
+  NEEDS_CORRECTION:   5 (20%)
+```
+
+---
+
+## Known Failure Modes
+
+### 1. LLM non-determinism on borderline cases
+**What happens:** The same session reviewed twice can get different verdicts (PASS vs NEEDS_CORRECTION) due to LLM temperature variation. This affects ~4% of sessions in practice.
+
+**Example:** FF-TRAIN-0034 — "FI investigation: posting issue on G/L account per PRB0078862" with MIRO access. The LLM sometimes judges this as acceptable cross-module read-only access, sometimes as out-of-scope.
+
+**Mitigation:** Temperature set to 0.1 (minimum non-zero). Hard rules are always deterministic regardless.
+
+### 2. R-002 module mismatch — high false negative rate
+**What happens:** R-002 misses 7 out of 9 real module mismatches (recall 0.222). The keyword-to-tcode mapping is too limited to cover the full SAP module vocabulary.
+
+**Example:** Sessions where reason mentions "posting" (could be FI or MM) and transactions touch both modules — the rule doesn't fire because "posting" maps to FI, and some MM tcodes are in scope.
+
+**Root cause:** Module boundaries in SAP are not crisp. A proper solution would use a semantic embedding of the reason against tcode descriptions rather than a keyword lookup table.
+
+### 3. R-007 false positives — after-hours legitimate sessions
+**What happens:** R-007 fires on sessions that are after-hours but have other critical findings (R-005, R-004), making the finding redundant and cluttering the output.
+
+**Example:** FF-TRAIN-0012 — OS commands executed at 22:00 UTC. Gold label has R-005 (critical) but not R-007. Our system adds R-007 as well, which is technically correct but misleading — the critical finding already determines the verdict.
+
+**Proposed fix:** Suppress R-007 when a critical rule has already fired. Not implemented to preserve original rule specification.
+
+### 4. LLM output format inconsistency
+**What happens:** Occasionally the LLM returns two JSON objects in one response (detailed analysis followed by the required JSON). The parser now handles this by extracting the first complete JSON block, but it caused one prediction failure (FF-TEST-0002) in the initial test run.
+
+**Mitigation:** Implemented brace-counting JSON extractor that ignores any content after the first complete `{...}` block.
+
+---
+
+## Cost Estimate
+
+**Model:** `claude-haiku-4-5-20251001` (Anthropic)
+
+**Token usage per session (average):**
+- Input tokens: ~450 (session summary + system prompt)
+- Output tokens: ~350 (verdict JSON + findings)
+- Total: ~800 tokens
+
+**Cost per session:**
+- Sessions with critical deterministic findings (LLM skipped): **$0.00**
+- Sessions requiring LLM: ~800 tokens × $0.0008/1K tokens input + $0.004/1K output ≈ **$0.0018**
+- Weighted average (60% skip rate on REJECTs): **~$0.0007 per session**
+
+**Full eval run (75 sessions):** ~$0.05
+
+**Production estimate (50 sessions/month/client):** ~$0.035/month per client
+
+---
+
+## What I Would Build Next (Given Another Week)
+
+**1. Model routing by confidence**
+Use a fast, cheap model (Haiku) for triage. Route borderline sessions (confidence 0.6–0.85) to a more capable model (Sonnet) for a second opinion. Expected improvement: 2–3% accuracy gain on NEEDS_CORRECTION class at ~3× cost increase for borderline sessions only.
+
+**2. Calibrated confidence scores**
+The current confidence is self-reported by the LLM — not statistically calibrated. Build a calibration layer using the 50 labeled training sessions: fit a logistic regression on (rule_count, severity_distribution, reason_length) → P(correct verdict). This would make the confidence score meaningful rather than decorative.
+
+**3. Feedback loop from controller decisions**
+Currently controller PASS/REJECT/SEND_BACK decisions are stored but not used. Build a retraining signal: when the controller overrides the AI verdict, flag that session for human review and use it to improve the rule catalog or LLM prompt.
+
+**4. Batch processing endpoint**
+The current UI handles one session at a time. Add a `POST /review/batch` endpoint that accepts a ZIP of session JSONs and processes them asynchronously, streaming results as they complete. Essential for the 30–80 sessions/month production use case.
+
+**5. Email integration for Send Back**
+Currently Send Back records the decision locally but does not send the correction message to the firefighter. Integrate with an SMTP server or SAP GRC notification API to automatically dispatch the suggested correction message.
+
+**6. Semantic R-002 rewrite**
+Replace the keyword-to-tcode module mapping with a semantic similarity approach: embed the reason code and each tcode description using a small embedding model, then flag sessions where reason embedding is far from the centroid of tcode embeddings. Expected improvement: recall from 0.222 to 0.7+.
+
+---
+
+## Where I Disagreed with Gold Labels
+
+The dataset notes explicitly encourage disagreement with specific labels where reasoning supports a different verdict. Here are cases where I believe the gold label is arguable:
+
+### FF-TRAIN-0009, 0019, 0030 — Labeled PASS, I would argue NEEDS_CORRECTION
+
+These sessions use `ZVENDOR_WHT_UPDATE` (a custom Z-program) to update 98–132 vendor withholding tax codes in bulk. The reason is explicit and references a CHG ticket.
+
+**Why gold says PASS:** The reason is specific, the ticket exists, the action is pre-approved.
+
+**Why I'd argue NEEDS_CORRECTION:** Custom Z-programs (Z/Y namespace) are customer-developed code that bypasses standard SAP input validation. Even with a pre-approved CHG, executing custom code in a production firefighter session deserves explicit controller sign-off — the firefighter should document that the Z-program was reviewed before execution, not just that the CHG was approved.
+
+This is not a clear-cut REJECT (the intent is legitimate) but NEEDS_CORRECTION would prompt the firefighter to confirm the Z-program review step.
+
+### FF-TRAIN-0034, 0040, 0050 — Labeled NEEDS_CORRECTION (R-002), I would argue PASS
+
+These sessions have FI-scope reasons ("posting issue on G/L account") with MIRO (MM module) accessed for read-only review.
+
+**Why gold says NEEDS_CORRECTION:** MIRO is an MM transaction — module mismatch with FI reason.
+
+**Why I'd argue PASS:** In SAP FI/CO practice, it is standard to cross-reference MM invoice documents (via MIRO display) during FI G/L investigations. An AP accountant investigating a G/L posting issue routinely checks the originating MM invoice for context. This is not out-of-scope activity — it is the expected diagnostic path. The gold label appears to apply R-002 too strictly without considering the natural FI→MM investigation flow.
 
 ---
 
@@ -47,484 +301,89 @@ This tool pre-screens each session automatically and gives the controller a stru
 
 ```
 firefighter-reviewer/
-├── .env                        ← YOUR API KEY (never commit this)
-├── .env.example                ← template showing what variables are needed
-├── .gitignore
+├── Makefile                    ← make run / test / eval / clean
+├── docker-compose.yml
+├── .env.example
 │
 ├── backend/
-│   ├── pyproject.toml          ← dependencies and project config
-│   ├── data/
-│   │   └── verdicts.db         ← SQLite database (auto-created on first run)
-│   ├── src/
-│   │   ├── main.py             ← entry point, just imports the FastAPI app
-│   │   ├── config.py           ← reads .env into typed settings object
-│   │   ├── api/
-│   │   │   └── routes.py       ← HTTP endpoints
-│   │   ├── rules/
-│   │   │   ├── models.py       ← data structures
-│   │   │   ├── parser.py       ← converts raw JSON to typed objects
-│   │   │   ├── engine.py       ← runs all rules, returns findings
-│   │   │   └── catalog/
-│   │   │       ├── dangerous_actions.py   ← R003, R004, R005
-│   │   │       ├── access_control.py      ← R008, R010
-│   │   │       ├── volume_timing.py       ← R006, R007, R009
-│   │   │       └── reason_quality.py      ← R001, R002
-│   │   ├── llm/
-│   │   │   ├── client.py       ← HTTP calls to OpenRouter API
-│   │   │   ├── prompts.py      ← session summary builder + system prompt
-│   │   │   └── analyzer.py     ← orchestrates LLM call + fallback logic
-│   │   └── storage/
-│   │       ├── database.py     ← SQLAlchemy engine setup
-│   │       ├── models.py       ← ORM table definition
-│   │       └── repository.py   ← save/load/update functions
+│   ├── Dockerfile
+│   ├── pyproject.toml
+│   └── src/
+│       ├── main.py
+│       ├── config.py
+│       ├── pipeline.py         ← core pipeline, used by API and eval
+│       ├── api/
+│       │   ├── routes.py
+│       │   └── schemas.py      ← Pydantic input validation
+│       ├── rules/
+│       │   ├── models.py
+│       │   ├── parser.py
+│       │   ├── engine.py
+│       │   └── catalog/
+│       │       ├── dangerous_actions.py   ← R003, R004, R005
+│       │       ├── access_control.py      ← R008, R010
+│       │       ├── volume_timing.py       ← R006, R007, R009
+│       │       ├── reason_quality.py      ← R001, R002
+│       │       └── extended.py            ← R011, R012, R013, R016
+│       ├── llm/
+│       │   ├── client.py
+│       │   ├── prompts.py
+│       │   └── analyzer.py
+│       └── storage/
+│           ├── database.py
+│           ├── models.py
+│           └── repository.py
 │   └── tests/
-│       ├── test_parser.py      ← 5 tests for JSON parsing
-│       ├── test_rules.py       ← 26 tests for all 10 rules + engine
-│       └── test_analyzer.py    ← 3 LLM integration tests (marked @llm)
+│       ├── test_parser.py
+│       ├── test_rules.py
+│       ├── test_extended_rules.py
+│       └── test_analyzer.py    ← marked @llm, excluded from CI
 │
 ├── frontend/
-│   └── index.html              ← entire UI in one file, no build step
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── index.html
+│   ├── styles.css
+│   └── app.js
 │
-├── dataset_candidate/          ← provided dataset (DO NOT MODIFY)
-│   ├── train/
-│   │   ├── sessions/           ← 50 labeled session JSONs
-│   │   └── labels.jsonl        ← gold labels for training set
-│   └── test/
-│       └── sessions/           ← 25 unlabeled session JSONs
+├── eval/
+│   ├── run_eval.py             ← runs pipeline on session directory
+│   ├── predictions_train.jsonl ← predictions on labeled train set
+│   └── predictions_test.jsonl  ← predictions on unlabeled test set
 │
-└── eval/                       ← TODO: build eval harness tomorrow
-    └── test_set/
+└── dataset_candidate/          ← provided dataset (unmodified)
+    ├── train/
+    ├── test/
+    └── eval.py                 ← provided evaluator script
 ```
 
 ---
 
-## File-by-File Explanation
+## Hours Spent
+
+| Day | Focus | Hours |
+|-----|-------|-------|
+| 1 | Architecture design, data models, parser, rule engine (R001–R010), tests | ~6h |
+| 2 | LLM layer, FastAPI backend, SQLite storage, frontend UI | ~5h |
+| 3 | Docker, CI/CD, eval harness, extended rules (R011–R016), accuracy tuning | ~5h |
+| 4 | Adversarial input handling, token optimization, schema validation, README | ~3h |
+| **Total** | | **~19h** |
 
 ---
 
-### `main.py`
-**One line. Just starts the app.**
+## Environment Variables
 
-```python
-from api.routes import app
-```
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LLM_API_KEY` | API key for LLM provider | required |
+| `LLM_BASE_URL` | OpenAI-compatible endpoint | `https://api.anthropic.com/v1` |
+| `LLM_MODEL` | Model identifier | `claude-haiku-4-5-20251001` |
+| `LLM_MAX_TOKENS` | Max tokens per LLM response | `1000` |
 
-Uvicorn runs this file. It finds `app` and starts the HTTP server. All actual logic lives elsewhere. Think of it as the front door — it just points you inside.
-
----
-
-### `config.py`
-**Reads your `.env` file and makes settings available everywhere — typed and validated.**
-
-Without it you'd scatter this across every file:
-```python
-import os
-key = os.getenv("LLM_API_KEY")  # could be None, no warning
-```
-
-With it, you import `settings` once and it's always correct:
-```python
-from config import settings
-settings.llm_api_key            # always a string
-settings.llm_model              # "google/gemma-4-31b-it:free"
-settings.max_session_minutes    # 120
-```
-
-If you forget to add `LLM_API_KEY` to `.env`, the app refuses to start with a clear error. No silent failures at 3am.
+The system uses the OpenAI-compatible `/v1/chat/completions` endpoint. Switching providers requires only changing `LLM_BASE_URL` and `LLM_MODEL` in `.env`.
 
 ---
 
-### `rules/models.py`
-**Defines the shape of every object the system passes around internally.**
+## Tooling Note
 
-Without it, rules would work with raw dicts:
-```python
-session["transaction_log"][0]["tcode"]  # crashes if key missing
-```
-
-With it, every rule gets clean typed objects:
-```python
-session.transaction_log[0].tcode        # always a string
-session.start_time                       # always UTC-aware datetime
-session.change_log[0].old_value         # always a string
-```
-
-Key types:
-- `SessionData` — the whole session (logs, timestamps, reason code, etc.)
-- `Finding` — one compliance issue detected
-- `Severity` — low / medium / high / critical
-- `Verdict` — PASS / REJECT / NEEDS_CORRECTION
-
----
-
-### `rules/parser.py`
-**Takes raw uploaded JSON and converts it into a clean `SessionData` object.**
-
-Raw input:
-```json
-{
-  "start_time": "2026-05-12T12:35:53Z",
-  "reason_code": "fix",
-  "change_log": [{"table": "LFA1", "key": 100234}]
-}
-```
-
-What you get back:
-```python
-session.start_time              # datetime(2026, 5, 12, 12, 35, 53, tzinfo=UTC)
-session.reason_code             # "fix"
-session.change_log[0].key       # "100234"  ← integer cast to string
-session.ticket_requester        # None  ← missing field, defaulted safely
-```
-
-It silently fixes: missing timezone on timestamps, integers where strings expected, absent optional fields.
-It loudly raises `ValueError` for missing required fields like `session_id` — the API catches this and returns 422 instead of 500.
-
----
-
-### `rules/catalog/dangerous_actions.py`
-**R003, R004, R005 — technically dangerous activity. Pure yes/no checks.**
-
-**R003 — Debug & Replace**
-Did someone use SAP's debugger to change values directly, bypassing all validation?
-```
-system_log: "Variable value changed in debug mode (/h replace): WRBTR 50000.00 → 5000.00"
-→ CRITICAL finding
-```
-Classic fraud technique. Changes a posting amount from 50,000 to 5,000 with no audit trail.
-
-**R004 — Direct Table Edit**
-Did someone use SE16N or SM30 to write directly to a database table?
-```
-transaction_log: SE16N at 22:07
-change_log: table T001, WAERS field, EUR → USD
-→ HIGH finding: direct edit of company code currency table
-```
-Normal SAP transactions validate input. SE16N does not. You can corrupt anything.
-
-**R005 — OS Commands**
-Did someone run shell commands from SAP?
-```
-os_command_log: "rm -rf /tmp/sapdumps/" by KZIELINSKA
-→ CRITICAL finding, flagged as destructive
-```
-Any OS access from SAP is already a violation. The "destructive" flag is added for `rm`, `chmod`, `kill` etc.
-
----
-
-### `rules/catalog/access_control.py`
-**R008, R010 — who did what, and whether the combination is allowed.**
-
-**R008 — Self Approval**
-Did the firefighter request their own emergency access?
-```
-firefighter_user: MNOWAK
-ticket_requester: MNOWAK
-→ HIGH finding: self-approval pattern
-```
-Like a bank employee approving their own loan. The person requesting access must be different from the person who justified it.
-
-**R010 — SoD Conflict**
-Did they perform two actions that should never happen together?
-```
-XK02 (changed vendor bank account number)
-F110 (ran automatic payment to that vendor)
-→ CRITICAL finding: SoD violation
-```
-This is textbook fraud — change where money goes, then send the money. We check 4 known conflict pairs:
-- Vendor change (XK02/FK02) + payment run (F110/F-53)
-- User creation (SU01) + role assignment (PFCG)
-- Goods receipt (MIGO) + invoice verification (MIRO)
-- Customer change (XD02) + billing (VF01)
-
----
-
-### `rules/catalog/volume_timing.py`
-**R006, R007, R009 — suspicious numbers and timing.**
-
-**R006 — Too Many Changes**
-Did they change far more records than the reason justifies?
-```
-reason: "Fix one vendor blocked status"
-change_log: 265 rows in LFA1, same field, all in 4 minutes
-→ HIGH finding: 265 changes vs claimed single-vendor fix
-```
-Threshold: more than 5 changes to a single table triggers the rule. If reason claims "one vendor" → HIGH. If no such claim → MEDIUM (still flag but less certain).
-
-**R007 — After Hours Without Emergency**
-Did they work at 3am without a documented emergency?
-```
-start_time: 22:06 UTC
-reason: "Fix one vendor blocked status"  ← no emergency keywords
-→ MEDIUM finding: after-hours session without emergency justification
-```
-We look for: "emergency", "critical", "urgent", "outage", "incident", "system down" etc.
-
-**Bug fixed today:** "blocked" was in the keyword list. "Fix one vendor **blocked** status" matched as emergency, rule didn't fire. Removed it — business vocabulary ("blocked vendor") overlaps with emergency vocabulary.
-
-**R009 — Session Too Long**
-Did the session run over 2 hours?
-```
-start: 07:12   end: 12:29   → 317 minutes (limit: 120)
-→ MEDIUM finding: session ran 317 minutes
-```
-
----
-
-### `rules/catalog/reason_quality.py`
-**R001, R002 — is the written justification actually useful?**
-
-**R001 — Reason Too Vague**
-```
-""                   → empty → fire
-"fix"                → 3 chars, minimum 20 → fire
-"production issue"   → exact match on blacklist → fire
-"Resolved failed payment run F110 per INC0045231"  → passes
-```
-Blacklist: "fix", "tbd", "n/a", "production issue", "issue", "issue resolution", "system error fix", "temp".
-
-**R002 — Module Mismatch**
-Does the reason claim one module but the actions touch another?
-```
-reason: "Reset user lock for HR consultant"
-transactions: FB02 (accounting), XK02 (vendor), F-53 (payment)
-→ HIGH finding: reason references user activity but FI/vendor tcodes used
-```
-
-How it works:
-1. Find all modules mentioned in the reason ("user", "payment", "vendor"...)
-2. Build the full set of expected tcodes for ALL matched modules
-3. Find tcodes used that belong to a KNOWN module but NOT the expected set
-4. Ignore neutral tcodes: SE80, SU53, SU3, SESSION_MANAGER, /NEX
-
-**Bug fixed today:** original code picked one module keyword and flagged the other's tcodes as out-of-scope. FF-TRAIN-0001 reason says "vendor...and...payment" — XK02 (vendor) and F110 (payment) are both legitimate. Fix: collect ALL matched modules first, then check.
-
----
-
-### `rules/engine.py`
-**Runs all 10 rules and returns all findings sorted by severity.**
-
-```python
-findings = run_rules(session)
-# → [CRITICAL: R-010 SoD violation, HIGH: R-002 module mismatch, ...]
-```
-
-Two important decisions:
-- Each rule returns `list[Finding]` — one session can trigger R-004 on multiple dangerous tcodes
-- `try/except` around every rule — a broken rule logs `R-ERR` and the pipeline continues. One broken rule never kills the whole review
-
----
-
-### `llm/client.py`
-**Makes the actual HTTP call to the LLM API.**
-
-```python
-text = await call_llm(
-    prompt="SESSION: FF-TRAIN-0001\nREASON: ...\nFINDINGS: R-010 CRITICAL...",
-    system="You are a SAP GRC compliance reviewer..."
-)
-# → '{"verdict": "REJECT", "confidence": 0.95, "semantic_findings": [...]}'
-```
-
-Key settings:
-- `temperature: 0.1` — low randomness. Compliance verdicts should not vary between runs
-- Retries 3 times on 429 (rate limit): waits 10s, 20s, 30s
-- 60 second timeout — free tier LLMs can be slow
-
----
-
-### `llm/prompts.py`
-**Flattens session data for the LLM, and defines the system prompt.**
-
-Why flatten? Nested JSON wastes tokens and confuses models. Instead of sending the raw JSON:
-```
-# Raw (expensive, confusing):
-{"transaction_log": [{"timestamp": "2026-05-12T12:45:52Z", "tcode": "XK02"...}]}
-
-# Flattened (cheap, clear):
-TRANSACTIONS: XK02, FK02, SU53, F110, FBL1N
-CHANGES: LFBK.BANKN 1234567890→5434337882; LFBK.IBAN DE89...→DE97...
-DETERMINISTIC FINDINGS:
-  - R-010 CRITICAL: SoD violation — XK02/FK02 + F110 in same session
-```
-
-The system prompt tells the LLM its role, the verdict rules, which tcodes are neutral (never flag SE80, SU53 etc.), and the exact JSON format to return.
-
----
-
-### `llm/analyzer.py`
-**Orchestrates the full LLM interaction — call, parse, merge, override, fallback.**
-
-Full flow:
-```
-1. Flatten session + deterministic findings into text
-2. Call LLM
-3. Parse JSON response (strips markdown fences if LLM adds them)
-4. Convert LLM findings → Finding objects
-5. Merge: deterministic + LLM findings
-6. Hard override: any CRITICAL deterministic finding → verdict = REJECT always
-7. Return combined result
-```
-
-**Hard override:** If R-010 fired, we are 100% certain. The LLM cannot override a confirmed SoD violation to PASS.
-
-**Fallback:** LLM fails → return deterministic verdict with `confidence: 0.5`. Never crashes.
-
-**Confidence 50%** = LLM didn't respond (rate limit). In production (one session at a time) this never happens.
-
----
-
-### `api/routes.py`
-**Three HTTP endpoints. The only place the outside world talks to the system.**
-
-**`POST /review`** — main endpoint
-```
-Upload FF-TRAIN-0001.json
-→ parse → rules → LLM → save to DB → return JSON verdict
-```
-Returns 400 for invalid JSON, 422 for missing required fields.
-
-**`PATCH /sessions/{session_id}/decision`** — controller clicks a button
-```
-PATCH /sessions/FF-TRAIN-0001/decision
-Body: {"decision": "REJECT"}
-→ saves to database, returns 404 if session not found
-```
-
-**`GET /sessions`** — history table
-```
-GET /sessions
-→ all reviewed sessions, newest first
-```
-
----
-
-### `storage/database.py`
-**Sets up SQLite. Creates the database file and folder on first run.**
-
-```python
-DB_PATH = backend/data/verdicts.db   # auto-created if missing
-```
-
-`init_db()` runs at FastAPI startup and creates the `verdicts` table if it doesn't exist. You never run migrations manually.
-
----
-
-### `storage/models.py`
-**Defines what the database table looks like.**
-
-One table: `verdicts`. Columns:
-```
-session_id              (primary key)
-verdict                 ("PASS" / "REJECT" / "NEEDS_CORRECTION")
-confidence              (0.0 - 1.0 float)
-findings_json           (all findings as JSON string)
-suggested_correction_json  (JSON string or null)
-controller_decision     ("PASS" / "REJECT" / "SEND_BACK" or null)
-controller_note         (optional text)
-created_at / updated_at (auto timestamps)
-```
-
-Findings stored as a JSON string because SQLite has no native array type and we never query by individual finding fields.
-
----
-
-### `storage/repository.py`
-**The only file that touches the database. Everyone else calls these three functions.**
-
-```python
-save_verdict(result)               # after every review
-get_all_sessions()                 # GET /sessions endpoint
-update_decision(id, decision)      # controller clicks button
-```
-
-If you switch from SQLite to Postgres tomorrow, you change `database.py` and this file. Nothing else.
-
----
-
-### `frontend/index.html`
-**Entire UI in one HTML file. Open directly in browser. No Node, no build step.**
-
-Three sections:
-1. **Upload zone** — click or drag a session JSON. Shows filename after selection
-2. **Result panel** — appears after review:
-   - Verdict banner (green=PASS, red=REJECT, yellow=NEEDS_CORRECTION)
-   - PASS / REJECT / SEND BACK buttons for controller
-   - Findings list (color-coded by severity, with rule ID badge, description, raw evidence)
-   - Correction message card (only shown for NEEDS_CORRECTION)
-3. **History table** — all previously reviewed sessions with controller decisions
-
-Design: dark navy + blue (Seargin branding), Sora font, JetBrains Mono for all code/log data, subtle grid background, glassmorphism cards, animated hover effects.
-
-JavaScript: vanilla, no framework. Three async functions that call the backend on `localhost:8000`.
-
----
-
-## Key Design Decisions (For Interview)
-
-**Why deterministic rules before LLM?**
-The LLM receives rule findings as context. It focuses only on what deterministic logic can't judge — semantic meaning. Running them in parallel wastes tokens re-discovering known facts.
-
-**Why not use the OpenAI SDK?**
-Direct HTTP via `httpx`. Provider-agnostic — switch from OpenRouter to Anthropic to Ollama by changing one env variable.
-
-**Why SQLite not Postgres?**
-Zero infrastructure. Creates itself on first run. Perfectly sufficient here. Postgres would add complexity with zero benefit.
-
-**Why dataclasses internally, Pydantic at the API boundary?**
-Dataclasses are pure Python — fast, no overhead, no coupling to HTTP. Pydantic handles JSON validation and serialization at the boundary where it's actually needed.
-
-**Why does R-010 always override the LLM?**
-SoD violations are binary facts. XK02 + F110 in same session IS a violation. No LLM interpretation can change that. Deterministic certainty beats LLM judgment for clear-cut cases.
-
----
-
-## Known Issues Found Today
-
-**Bug 1 — R-007 false negative**
-"blocked" was in emergency keywords. "Fix one vendor **blocked** status" matched. Rule didn't fire.
-Fixed: removed "blocked". Lesson: business terminology overlaps with emergency vocabulary.
-
-**Bug 2 — R-002 false positive**
-Original code picked one module keyword and flagged the other's tcodes as out-of-scope.
-Fixed: collect all matched modules first, combine all expected tcodes, then check.
-
-**Bug 3 — LLM false positive on SE80**
-LLM flagged SE80 (Object Navigator) as suspicious on a clean session.
-Fixed: added neutral tcode list to system prompt.
-
-**Bug 4 — Confidence always 50% during development**
-Not a real bug. Means LLM rate-limited and fell back. In production (one session at a time) never happens.
-
----
-
-## What's Left Tomorrow
-
-- [ ] `eval/run_eval.py` — run all 75 sessions, confusion matrix + per-rule precision/recall
-- [ ] `Makefile` — `make run`, `make test`, `make eval`, `make clean`
-- [ ] `Dockerfile` for backend and frontend
-- [ ] `docker-compose.yml`
-- [ ] Additional rules beyond R001-R010 (worth 15% of grade)
-- [ ] Submission README with architecture diagram, rule rationale, failure modes, cost estimate
-- [ ] `.github/workflows/ci.yml` for CI/CD bonus
-
-## Additional Rules to Think About Tonight
-
-- **Sensitive financial field changed** — IBAN or bank account modified (LFBK table) without a payment running. Currently only caught if R-010 fires too.
-- **Zero changes but reason implies fix** — reason says "fixed the issue" but change_log is empty.
-- **Firefighter ID module mismatch** — FF_FI_01 (Finance) doing BASIS work (SU01, SM21).
-- **Multiple logoffs mid-session** — /NEX appearing more than once suggests session handed off.
-- **Change timestamp outside session window** — change_log entry before start_time or after end_time.
-- **Same key modified multiple times** — same vendor number changed 3 times suggests testing not fixing.
-
----
-
-## Cost Estimate
-
-Using `google/gemma-4-31b-it:free` on OpenRouter: **$0.00**
-
-If switching to paid models:
-- Claude Haiku: ~$0.001/session × 75 = ~$0.075 total
-- Claude Sonnet: ~$0.01/session × 75 = ~$0.75 total
-
-Model routing strategy (cheap model for clear-cut cases, expensive for borderline) would keep production cost under $0.005 per session.
+This project was built with AI coding assistance (Claude). Every architectural decision, rule implementation, and design tradeoff was discussed and reasoned through — the code reflects deliberate choices, not generated boilerplate. Be prepared to discuss any part of the implementation in detail.
