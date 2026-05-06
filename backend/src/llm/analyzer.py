@@ -5,8 +5,10 @@ from rules.models import Finding, Severity, SessionData, Verdict
 from llm.client import call_llm
 from llm.prompts import build_session_summary, SYSTEM_PROMPT
 
-# Rules that always mean REJECT with 100% certainty — skip LLM entirely
+# Rules that guarantee REJECT with 100% certainty — skip LLM entirely
+# R-016 not included — bank change alone needs LLM context judgment
 _ALWAYS_REJECT_RULES = {"R-003", "R-004", "R-005", "R-008", "R-010"}
+
 def _parse_llm_response(raw: str) -> dict:
     """Extract JSON from LLM response, stripping markdown fences if present."""
     clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
@@ -76,15 +78,22 @@ async def analyze_session(
     }
 
 
+# Only these rules can force REJECT in fallback mode
+_HARD_REJECT_RULES = {"R-003", "R-004", "R-005", "R-008", "R-010"}
+
+
 def _derive_verdict(findings: list[Finding]) -> str:
     """Fallback verdict based purely on deterministic findings."""
     if not findings:
         return Verdict.PASS.value
-    severities = {f.severity for f in findings}
-    if Severity.CRITICAL in severities:
+
+    rule_ids = {f.rule_id for f in findings}
+
+    # Only hard rules force REJECT
+    if rule_ids & _HARD_REJECT_RULES:
         return Verdict.REJECT.value
-    if Severity.HIGH in severities:
-        return Verdict.REJECT.value
+
+    # Everything else → NEEDS_CORRECTION if there are findings
     return Verdict.NEEDS_CORRECTION.value
 
 

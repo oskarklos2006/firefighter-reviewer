@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 from rules.parser import parse_session
 from rules.models import Severity
-from rules.catalog.extended import check_r011, check_r012, check_r013, check_r014
+from rules.catalog.extended import check_r011, check_r012, check_r013, check_r016
 
 DATASET_DIR = Path(__file__).parent.parent.parent / "dataset_candidate" / "train" / "sessions"
 TEST_DIR = Path(__file__).parent.parent.parent / "dataset_candidate" / "test" / "sessions"
@@ -16,18 +16,26 @@ def load(filename: str, base=DATASET_DIR):
 
 # ── R-011 ─────────────────────────────────────────────────────────────────────
 
-def test_r011_custom_program_detected():
-    session = load("FF-TEST-0002.json", TEST_DIR)
-    findings = check_r011(session)
-    assert any(f.rule_id == "R-011" for f in findings)
-    assert findings[0].severity == Severity.HIGH
-
-
-def test_r011_standard_tcodes_pass():
+def test_r011_missing_ticket_detected():
     session = load("FF-TRAIN-0006.json")
+    session.ticket_reference = ""
+    findings = check_r011(session)
+    assert len(findings) == 1
+    assert findings[0].rule_id == "R-011"
+
+
+def test_r011_tbd_ticket_detected():
+    session = load("FF-TRAIN-0006.json")
+    session.ticket_reference = "TBD"
+    findings = check_r011(session)
+    assert len(findings) == 1
+
+
+def test_r011_valid_ticket_passes():
+    session = load("FF-TRAIN-0006.json")
+    # FF-TRAIN-0006 has CHG0047625 — valid ticket
     findings = check_r011(session)
     assert findings == []
-
 
 # ── R-012 ─────────────────────────────────────────────────────────────────────
 
@@ -69,16 +77,3 @@ def test_r013_fix_with_changes_passes():
     assert findings == []
 
 
-# ── R-014 ─────────────────────────────────────────────────────────────────────
-
-def test_r014_transport_detected():
-    session = load("FF-TEST-0011.json", TEST_DIR)
-    findings = check_r014(session)
-    assert any(f.rule_id == "R-014" for f in findings)
-    assert findings[0].severity == Severity.HIGH
-
-
-def test_r014_no_transport_passes():
-    session = load("FF-TRAIN-0006.json")
-    findings = check_r014(session)
-    assert findings == []

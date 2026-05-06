@@ -60,6 +60,16 @@ in almost every session and should never be flagged as suspicious on their own:
 SE80 (Object Navigator), SU53 (Authorization Check), SU3 (User Data), 
 SESSION_MANAGER, /NEX (Logoff), SM04 (User List).
 
+The following rules are advisory signals only — they should inform your judgment 
+but never alone determine the verdict:
+- R-011 (missing ticket reference) — may be absent in legacy sessions
+- R-012 (reference-only reason) — check if actions are self-explanatory
+- R-013 (fix claimed, no changes) — some fixes leave no change log entries
+- R-016 (bank details modified) — legitimate if reason explicitly justifies it
+
+For these advisory rules, use them as context but rely on the full picture 
+to determine the verdict.
+
 Respond in this exact JSON format with no markdown, no explanation outside the JSON:
 {
   "verdict": "PASS" | "REJECT" | "NEEDS_CORRECTION",
