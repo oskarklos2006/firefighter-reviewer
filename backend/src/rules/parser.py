@@ -1,3 +1,15 @@
+# ─────────────────────────────────────────────────────────────
+# parser.py
+# Converts raw session JSON dicts into typed SessionData objects.
+# This is the only place that touches raw dict keys - everything
+# downstream works with typed dataclasses.
+# Handles real-world SAP log quirks:
+#   - timestamps without timezone info (assumes UTC)
+#   - integer keys in change_log (SAP sometimes sends numbers)
+#   - missing optional fields (ticket_requester, alert_source)
+#   - out-of-order log entries (sorted by timestamp after parsing)
+# ─────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
@@ -9,7 +21,8 @@ from rules.models import (
 
 
 def _parse_timestamp(value: str) -> datetime:
-    """Parse ISO 8601 timestamp, always return UTC-aware datetime."""
+    # dateutil handles timezone variants and missing milliseconds
+    # that datetime.fromisoformat would reject
     dt = dateutil_parser.parse(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -32,7 +45,7 @@ def _parse_change_log(entries: list[dict]) -> list[ChangeEntry]:
         ChangeEntry(
             timestamp=_parse_timestamp(e["timestamp"]),
             table=e["table"],
-            key=str(e["key"]),
+            key=str(e["key"]),          # SAP sometimes sends integers
             field=e["field"],
             old_value=str(e.get("old_value", "")),
             new_value=str(e.get("new_value", "")),
@@ -63,12 +76,8 @@ def _parse_os_command_log(entries: list[dict]) -> list[OsCommandEntry]:
         for e in entries
     ], key=lambda x: x.timestamp)
 
+
 def parse_session(raw: dict[str, Any]) -> SessionData:
-    """
-    Convert raw JSON dict into a SessionData object.
-    Handles missing optional fields gracefully.
-    Raises ValueError on malformed input with a descriptive message.
-    """
     try:
         return SessionData(
             session_id=raw["session_id"],

@@ -1,3 +1,10 @@
+# ─────────────────────────────────────────────────────────────
+# test_parser.py
+# Unit tests for the session JSON parser.
+# Covers all three verdict types plus error handling and
+# optional field defaults. Uses real dataset files as fixtures.
+# ─────────────────────────────────────────────────────────────
+
 import json
 import pytest
 from pathlib import Path
@@ -22,7 +29,7 @@ def test_parse_reject_session():
     assert len(session.transaction_log) == 8
     assert len(session.change_log) == 2
     assert session.transaction_log[0].tcode == "XK02"
-    assert session.start_time.tzinfo is not None  # UTC-aware
+    assert session.start_time.tzinfo is not None
 
 
 def test_parse_pass_session():
@@ -43,7 +50,7 @@ def test_parse_needs_correction_session():
     assert session.change_log == []
     assert len(session.transaction_log) == 16
     duration = session.end_time - session.start_time
-    assert duration.total_seconds() / 3600 > 4  # over 4 hours
+    assert duration.total_seconds() / 3600 > 4
 
 
 def test_missing_required_field_raises():
@@ -52,7 +59,7 @@ def test_missing_required_field_raises():
 
 
 def test_optional_fields_default_to_none():
+    # FF-TRAIN-0001 has no ticket_requester field in the JSON
     raw = load_session("FF-TRAIN-0001.json")
     session = parse_session(raw)
-    # FF-TRAIN-0001 has no ticket_requester
     assert session.ticket_requester is None

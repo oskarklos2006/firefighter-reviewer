@@ -1,3 +1,12 @@
+# ─────────────────────────────────────────────────────────────
+# test_analyzer.py
+# Integration tests for the full LLM pipeline.
+# Marked @llm so they are excluded from the standard test suite:
+#   pytest tests/ -m "not llm"   - fast, no API calls
+#   pytest tests/ -m "llm"       - slow, requires LLM_API_KEY
+# 30 second sleep between tests avoids free tier rate limits.
+# ─────────────────────────────────────────────────────────────
+
 import pytest
 import asyncio
 import json
@@ -13,6 +22,7 @@ def load(filename: str):
     with open(DATASET_DIR / filename) as f:
         return parse_session(json.load(f))
 
+
 @pytest.mark.llm
 @pytest.mark.asyncio
 async def test_analyze_reject_session():
@@ -24,6 +34,7 @@ async def test_analyze_reject_session():
     assert result["confidence"] > 0.7
     assert len(result["findings"]) >= 2
 
+
 @pytest.mark.llm
 @pytest.mark.asyncio
 async def test_analyze_pass_session():
@@ -33,6 +44,7 @@ async def test_analyze_pass_session():
     result = await analyze_session(session, findings)
     assert result["verdict"] == "PASS"
 
+
 @pytest.mark.llm
 @pytest.mark.asyncio
 async def test_analyze_needs_correction_session():
@@ -41,7 +53,6 @@ async def test_analyze_needs_correction_session():
     findings = run_rules(session)
     result = await analyze_session(session, findings)
     assert result["verdict"] == "NEEDS_CORRECTION"
-    # suggested_correction requires LLM — only check if LLM succeeded
+    # suggested_correction is only present when LLM responded successfully
     if "llm_error" not in result:
         assert result["suggested_correction"] is not None
-

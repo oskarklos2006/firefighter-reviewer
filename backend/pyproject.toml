@@ -8,21 +8,17 @@ version = "0.1.0"
 requires-python = ">=3.12"
 
 dependencies = [
-    # API framework
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
 
-    # Data validation - used everywhere: input JSON, output JSON, config
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
 
-    # Database
     "sqlalchemy>=2.0",
 
     # HTTP client for LLM API calls
     "httpx>=0.27",
 
-    # Date/time handling - SAP logs are always UTC ISO 8601
     "python-dateutil>=2.9",
 
     "python-multipart>=0.0.9",

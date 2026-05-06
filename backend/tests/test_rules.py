@@ -1,3 +1,12 @@
+# ─────────────────────────────────────────────────────────────
+# test_rules.py
+# Unit tests for all 10 baseline rules plus engine integration.
+# Each rule has a positive detection test and a negative test
+# confirming clean sessions don't trigger false positives.
+# Uses real dataset files as fixtures - modifies fields in memory
+# to create specific test conditions without changing the files.
+# ─────────────────────────────────────────────────────────────
+
 import json
 import pytest
 from pathlib import Path
@@ -17,7 +26,7 @@ def load(filename: str):
         return parse_session(json.load(f))
 
 
-# ── R-001 ────────────────────────────────────────────────────────────────────
+# R-001 -----------------------------------------------------------------------
 
 def test_r001_empty_reason():
     session = load("FF-TRAIN-0001.json")
@@ -48,7 +57,7 @@ def test_r001_good_reason_passes():
     assert findings == []
 
 
-# ── R-002 ────────────────────────────────────────────────────────────────────
+# R-002 -----------------------------------------------------------------------
 
 def test_r002_reason_mentions_user_but_fi_tcodes():
     session = load("FF-TRAIN-0001.json")
@@ -58,13 +67,13 @@ def test_r002_reason_mentions_user_but_fi_tcodes():
 
 
 def test_r002_aligned_reason_passes():
+    # reason mentions vendor, tcodes are XK02/FK02 - aligned
     session = load("FF-TRAIN-0001.json")
-    # reason mentions vendor, tcodes are XK02/FK02 — aligned
     findings = check_r002(session)
     assert findings == []
 
 
-# ── R-003 ────────────────────────────────────────────────────────────────────
+# R-003 -----------------------------------------------------------------------
 
 def test_r003_debug_detected():
     session = load("FF-TRAIN-0001.json")
@@ -88,7 +97,7 @@ def test_r003_no_debug_passes():
     assert findings == []
 
 
-# ── R-004 ────────────────────────────────────────────────────────────────────
+# R-004 -----------------------------------------------------------------------
 
 def test_r004_se16n_detected():
     session = load("FF-TRAIN-0004.json")
@@ -103,7 +112,7 @@ def test_r004_clean_session_passes():
     assert findings == []
 
 
-# ── R-005 ────────────────────────────────────────────────────────────────────
+# R-005 -----------------------------------------------------------------------
 
 def test_r005_os_command_detected():
     session = load("FF-TRAIN-0001.json")
@@ -129,9 +138,10 @@ def test_r005_empty_log_passes():
     assert findings == []
 
 
-# ── R-006 ────────────────────────────────────────────────────────────────────
+# R-006 -----------------------------------------------------------------------
 
 def test_r006_mass_changes_single_item_claim():
+    # FF-TRAIN-0004 has 265 changes but reason claims single vendor fix
     session = load("FF-TRAIN-0004.json")
     findings = check_r006(session)
     assert any(f.rule_id == "R-006" for f in findings)
@@ -144,23 +154,23 @@ def test_r006_single_change_passes():
     assert findings == []
 
 
-# ── R-007 ────────────────────────────────────────────────────────────────────
+# R-007 -----------------------------------------------------------------------
 
 def test_r007_after_hours_no_emergency():
+    # FF-TRAIN-0004 starts at 22:06 UTC with no emergency keywords
     session = load("FF-TRAIN-0004.json")
-    # starts at 22:06 UTC, reason has no emergency keywords
     findings = check_r007(session)
     assert any(f.rule_id == "R-007" for f in findings)
 
 
 def test_r007_business_hours_passes():
+    # FF-TRAIN-0006 starts at 11:39 UTC
     session = load("FF-TRAIN-0006.json")
-    # starts at 11:39 UTC
     findings = check_r007(session)
     assert findings == []
 
 
-# ── R-008 ────────────────────────────────────────────────────────────────────
+# R-008 -----------------------------------------------------------------------
 
 def test_r008_self_approval_detected():
     session = load("FF-TRAIN-0001.json")
@@ -184,9 +194,10 @@ def test_r008_no_requester_field_passes():
     assert findings == []
 
 
-# ── R-009 ────────────────────────────────────────────────────────────────────
+# R-009 -----------------------------------------------------------------------
 
 def test_r009_long_session_detected():
+    # FF-TRAIN-0016 ran for 317 minutes
     session = load("FF-TRAIN-0016.json")
     findings = check_r009(session)
     assert any(f.rule_id == "R-009" for f in findings)
@@ -199,11 +210,11 @@ def test_r009_short_session_passes():
     assert findings == []
 
 
-# ── R-010 ────────────────────────────────────────────────────────────────────
+# R-010 -----------------------------------------------------------------------
 
 def test_r010_sod_violation_detected():
+    # FF-TRAIN-0001 has XK02, FK02, F110 - classic SoD violation
     session = load("FF-TRAIN-0001.json")
-    # has XK02, FK02, F110 — classic SoD violation
     findings = check_r010(session)
     assert any(f.rule_id == "R-010" for f in findings)
     assert findings[0].severity == Severity.CRITICAL
@@ -215,7 +226,7 @@ def test_r010_clean_session_passes():
     assert findings == []
 
 
-# ── Engine integration ────────────────────────────────────────────────────────
+# Engine integration ----------------------------------------------------------
 
 def test_engine_reject_session_has_critical_findings():
     session = load("FF-TRAIN-0001.json")

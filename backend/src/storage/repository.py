@@ -1,3 +1,11 @@
+# ─────────────────────────────────────────────────────────────
+# repository.py
+# The only place in the codebase that reads or writes the database.
+# All other modules call these three functions - never SQL directly.
+# Findings are stored as JSON strings because SQLite has no native
+# array type and we never need to query by individual finding fields.
+# ─────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 import json
 from storage.database import SessionLocal
@@ -13,6 +21,7 @@ def save_verdict(result: dict) -> None:
             findings_json=json.dumps(result["findings"]),
             suggested_correction_json=json.dumps(result.get("suggested_correction")),
         )
+        # merge upserts - re-analyzing a session overwrites the previous verdict
         db.merge(record)
         db.commit()
 

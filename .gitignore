@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project specific
+backend/data/
+eval/predictions_*.jsonl
+analyze_train.py
+analyze_test.py
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# PyCharm - uncomment to hide IDE files from repo
+.idea/

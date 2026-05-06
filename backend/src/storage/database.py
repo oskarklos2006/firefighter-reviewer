@@ -11,5 +11,5 @@ Base = declarative_base()
 
 
 def init_db():
-    from storage.models import VerdictRecord  # noqa: F401
+    from storage.models import VerdictRecord
     Base.metadata.create_all(bind=engine)

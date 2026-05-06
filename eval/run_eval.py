@@ -1,11 +1,17 @@
-"""
-Eval harness for the Firefighter Log Reviewer.
-Runs the full pipeline on all sessions in a directory and writes predictions JSONL.
+# ─────────────────────────────────────────────────────────────
+# run_eval.py
+# Runs the full review pipeline on a directory of session files
+# and writes predictions to a JSONL file for evaluation.
+# Used by `make eval` to generate predictions on the train set.
+#
+# Usage:
+#   python eval/run_eval.py --sessions dataset_candidate/train/sessions
+#   python eval/run_eval.py --sessions dataset_candidate/test/sessions
+#
+# Output is written to eval/predictions_<set>.jsonl
+# Then evaluated with: python dataset_candidate/eval.py --predictions ...
+# ─────────────────────────────────────────────────────────────
 
-Usage:
-    python eval/run_eval.py --sessions dataset_candidate/train/sessions
-    python eval/run_eval.py --sessions dataset_candidate/test/sessions
-"""
 from __future__ import annotations
 import argparse
 import asyncio
@@ -16,8 +22,8 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent.parent
 
-# Allow imports from backend/src
-sys.path.insert(0, str(Path(__file__).parent.parent / "backend" / "src"))
+# Add backend/src to path so pipeline imports work without installing the package
+sys.path.insert(0, str(ROOT_DIR / "backend" / "src"))
 
 from pipeline import review_session_data
 
@@ -44,20 +50,17 @@ async def run_eval(sessions_dir: Path, output_path: Path, delay: float = 3.0):
         try:
             with open(session_file) as f:
                 raw = json.load(f)
-
             result = await review_session_data(raw)
             results.append(result)
             print(f"{result['verdict']} (confidence: {result['confidence']:.2f})")
-
         except Exception as e:
             print(f"FAILED: {e}")
             failed.append(session_file.name)
 
-        # Delay between calls to avoid rate limiting
+        # Pause between sessions to stay within LLM rate limits
         if i < len(session_files):
             time.sleep(delay)
 
-    # Write predictions JSONL
     with open(output_path, "w") as f:
         for result in results:
             f.write(json.dumps(result) + "\n")
@@ -68,7 +71,7 @@ async def run_eval(sessions_dir: Path, output_path: Path, delay: float = 3.0):
     if failed:
         print(f"Failed sessions ({len(failed)}): {', '.join(failed)}")
 
-    # Verdict distribution
+    # Verdict distribution summary
     verdicts = [r["verdict"] for r in results]
     for v in ["PASS", "REJECT", "NEEDS_CORRECTION"]:
         count = verdicts.count(v)
@@ -77,22 +80,9 @@ async def run_eval(sessions_dir: Path, output_path: Path, delay: float = 3.0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--sessions",
-        required=True,
-        help="Path to sessions directory"
-    )
-    ap.add_argument(
-        "--output",
-        default=None,
-        help="Output JSONL path (default: eval/predictions_<dirname>.jsonl)"
-    )
-    ap.add_argument(
-        "--delay",
-        type=float,
-        default=3.0,
-        help="Seconds between LLM calls (default: 3.0)"
-    )
+    ap.add_argument("--sessions", required=True, help="Path to sessions directory")
+    ap.add_argument("--output", default=None, help="Output JSONL path")
+    ap.add_argument("--delay", type=float, default=3.0, help="Seconds between LLM calls")
     args = ap.parse_args()
 
     sessions_dir = Path(args.sessions)
@@ -100,10 +90,10 @@ def main():
         print(f"Directory not found: {sessions_dir}")
         sys.exit(1)
 
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        output_path = ROOT_DIR / "eval" / f"predictions_{sessions_dir.parent.name}.jsonl"
+    output_path = (
+        Path(args.output) if args.output
+        else ROOT_DIR / "eval" / f"predictions_{sessions_dir.parent.name}.jsonl"
+    )
 
     asyncio.run(run_eval(sessions_dir, output_path, args.delay))
 

@@ -1,3 +1,11 @@
+# ─────────────────────────────────────────────────────────────
+# models.py
+# Internal data structures used throughout the pipeline.
+# These are plain Python dataclasses - not Pydantic models.
+# Pydantic is used only at the API boundary (api/schemas.py).
+# Keeping them separate prevents coupling rule logic to HTTP concerns.
+# ─────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -5,6 +13,7 @@ from enum import Enum
 from typing import Optional
 
 
+# Inheriting from str allows direct JSON serialization without a custom encoder
 class Severity(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
@@ -18,6 +27,7 @@ class Verdict(str, Enum):
     NEEDS_CORRECTION = "NEEDS_CORRECTION"
 
 
+# One compliance issue detected by a rule or the LLM
 @dataclass
 class Finding:
     rule_id: str
@@ -26,6 +36,8 @@ class Finding:
     description: str
     evidence: str
 
+
+# Log entry types - one per log array in the session JSON
 
 @dataclass
 class TransactionEntry:
@@ -59,6 +71,8 @@ class OsCommandEntry:
     executed_by: str
 
 
+# The full parsed session - passed through the entire pipeline.
+# Optional fields at the bottom because not all sessions include them.
 @dataclass
 class SessionData:
     session_id: str

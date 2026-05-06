@@ -12,11 +12,10 @@ class Settings(BaseSettings):
     )
 
     llm_api_key: str = ""
-    llm_base_url: str = "https://openrouter.ai/api/v1"
-    llm_model: str = "google/gemini-2.0-flash-exp:free"
+    llm_base_url: str = "https://api.anthropic.com/v1"
+    llm_model: str = "claude-haiku-4-5-20251001"
     llm_max_tokens: int = 1000
 
-    # Rule thresholds — tunable without touching rule code
     max_session_minutes: int = 120
     max_changes_single_table: int = 5
     business_hours_start: int = 7

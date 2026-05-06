@@ -1,19 +1,29 @@
+# ─────────────────────────────────────────────────────────────
+# dangerous_actions.py
+# Rules that detect technically dangerous activity in a session.
+# All three rules are fully deterministic - no LLM needed.
+#   R-003: debug mode activity in system log
+#   R-004: direct table edit via SE16N or SM30
+#   R-005: OS-level commands executed from SAP
+# ─────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 from rules.models import Finding, Severity, SessionData
 
-# R-003: Debug & replace activity
+# Keywords that indicate debug mode was active in the system log
 _DEBUG_KEYWORDS = ["/h", "debug", "replace", "value modified", "variable value changed"]
 
-# R-004: Direct table modification via dangerous transactions
+# SE16N and SM30 allow direct database writes, bypassing SAP input validation
 _DANGEROUS_TCODES = {"SE16N", "SM30"}
+
+# Tables containing financial config, vendor data, user credentials, or payroll
 _SENSITIVE_TABLES = {"T001", "T001W", "LFBK", "LFA1", "KNA1", "USR02", "PA0008", "BSEG"}
 
-# R-005: OS-level commands
+# Commands that are destructive or could exfiltrate data
 _DANGEROUS_OS_COMMANDS = {"rm", "chmod", "chown", "kill", "wget", "curl", "bash", "sh", "zsh"}
 
 
 def check_r003(session: SessionData) -> list[Finding]:
-    """Debug & replace activity detected in system log."""
     findings = []
     for i, entry in enumerate(session.system_log):
         message_lower = entry.message.lower()
@@ -26,13 +36,12 @@ def check_r003(session: SessionData) -> list[Finding]:
                     "Debug session detected during firefighter window. "
                     "Debug & replace cannot be ruled out without further inspection."
                 ),
-                evidence=f"{entry.timestamp.isoformat()} — {entry.message}",
+                evidence=f"{entry.timestamp.isoformat()} - {entry.message}",
             ))
     return findings
 
 
 def check_r004(session: SessionData) -> list[Finding]:
-    """Direct table modification via SE16N or SM30 on sensitive tables."""
     findings = []
 
     dangerous_tcodes_used = {
@@ -46,6 +55,7 @@ def check_r004(session: SessionData) -> list[Finding]:
     }
 
     for tcode in dangerous_tcodes_used:
+        # Include which sensitive tables were touched if any - stronger evidence
         if sensitive_tables_modified:
             evidence = (
                 f"{tcode} executed; sensitive tables modified: "
@@ -69,11 +79,12 @@ def check_r004(session: SessionData) -> list[Finding]:
 
 
 def check_r005(session: SessionData) -> list[Finding]:
-    """OS-level commands executed during firefighter session."""
+    # Any OS command from SAP is a violation regardless of what it does.
+    # The destructive flag is added for commands that could cause immediate damage.
     findings = []
     for i, entry in enumerate(session.os_command_log):
         command_lower = entry.command.lower()
-        is_dangerous = any(cmd in command_lower for cmd in _DANGEROUS_OS_COMMANDS)
+        is_destructive = any(cmd in command_lower for cmd in _DANGEROUS_OS_COMMANDS)
 
         findings.append(Finding(
             rule_id="R-005",
@@ -82,10 +93,10 @@ def check_r005(session: SessionData) -> list[Finding]:
             description=(
                 "OS-level command executed during firefighter session. "
                 "Any OS access from SAP requires separate authorization and justification."
-                + (" Command appears destructive." if is_dangerous else "")
+                + (" Command appears destructive." if is_destructive else "")
             ),
             evidence=(
-                f"{entry.timestamp.isoformat()} — "
+                f"{entry.timestamp.isoformat()} - "
                 f"{entry.command} {entry.parameters} (executed by {entry.executed_by})"
             ),
         ))
