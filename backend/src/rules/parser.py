@@ -17,18 +17,18 @@ def _parse_timestamp(value: str) -> datetime:
 
 
 def _parse_transaction_log(entries: list[dict]) -> list[TransactionEntry]:
-    return [
+    return sorted([
         TransactionEntry(
             timestamp=_parse_timestamp(e["timestamp"]),
             tcode=e["tcode"],
             description=e.get("description", ""),
         )
         for e in entries
-    ]
+    ], key=lambda x: x.timestamp)
 
 
 def _parse_change_log(entries: list[dict]) -> list[ChangeEntry]:
-    return [
+    return sorted([
         ChangeEntry(
             timestamp=_parse_timestamp(e["timestamp"]),
             table=e["table"],
@@ -38,22 +38,22 @@ def _parse_change_log(entries: list[dict]) -> list[ChangeEntry]:
             new_value=str(e.get("new_value", "")),
         )
         for e in entries
-    ]
+    ], key=lambda x: x.timestamp)
 
 
 def _parse_system_log(entries: list[dict]) -> list[SystemLogEntry]:
-    return [
+    return sorted([
         SystemLogEntry(
             timestamp=_parse_timestamp(e["timestamp"]),
             message=e.get("message", ""),
             type=e.get("type", ""),
         )
         for e in entries
-    ]
+    ], key=lambda x: x.timestamp)
 
 
 def _parse_os_command_log(entries: list[dict]) -> list[OsCommandEntry]:
-    return [
+    return sorted([
         OsCommandEntry(
             timestamp=_parse_timestamp(e["timestamp"]),
             command=e.get("command", ""),
@@ -61,8 +61,7 @@ def _parse_os_command_log(entries: list[dict]) -> list[OsCommandEntry]:
             executed_by=e.get("executed_by", ""),
         )
         for e in entries
-    ]
-
+    ], key=lambda x: x.timestamp)
 
 def parse_session(raw: dict[str, Any]) -> SessionData:
     """

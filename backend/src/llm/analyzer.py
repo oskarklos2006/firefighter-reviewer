@@ -4,6 +4,9 @@ import re
 from rules.models import Finding, Severity, SessionData, Verdict
 from llm.client import call_llm
 from llm.prompts import build_session_summary, SYSTEM_PROMPT
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Rules that guarantee REJECT with 100% certainty — skip LLM entirely
 # R-016 not included — bank change alone needs LLM context judgment
@@ -54,7 +57,7 @@ async def analyze_session(
         raw = await call_llm(summary, system=SYSTEM_PROMPT)
         parsed = _parse_llm_response(raw)
     except Exception as e:
-        print("LLM ERROR:", str(e))
+        logger.error("LLM call failed: %s", str(e))
         return _fallback_verdict(deterministic_findings, str(e))
 
     llm_findings = _findings_from_llm(parsed.get("semantic_findings", []))
