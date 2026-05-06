@@ -7,7 +7,8 @@ from typing import Optional
 from storage.repository import save_verdict, get_all_sessions, update_decision
 from storage.database import init_db
 from pipeline import review_session_data
-
+from api.schemas import SessionSchema
+from pydantic import ValidationError
 
 app = FastAPI(title="Firefighter Log Reviewer", version="0.1.0")
 
@@ -39,6 +40,15 @@ async def review_session(
         raw = json.loads(content)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON file")
+
+    # Validate schema
+    try:
+        SessionSchema(**raw)
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid session structure: {e.errors()[0]['msg']}"
+        )
 
     try:
         response = await review_session_data(raw, force_llm=force_llm)
