@@ -5,19 +5,32 @@ from rules.models import Finding, SessionData
 def build_session_summary(session: SessionData, findings: list[Finding]) -> str:
     """
     Flatten session into a token-efficient string for the LLM.
-    No nested JSON — just the facts the LLM needs.
+    - Neutral/diagnostic tcodes excluded (they add noise, not signal)
+    - Change log truncated to first 10 entries if excessive
+    - Empty logs omitted entirely
     """
-    tcodes = ", ".join(e.tcode for e in session.transaction_log) or "none"
+    # Exclude neutral tcodes — they appear in every session and add no signal
+    _NEUTRAL = {"SE80", "SU53", "SU3", "SESSION_MANAGER", "/NEX", "SM04", "SMEN"}
+
+    meaningful_tcodes = [
+        e.tcode for e in session.transaction_log
+        if e.tcode not in _NEUTRAL
+    ]
+    tcodes = ", ".join(meaningful_tcodes) or "none"
+
+    # Truncate change log if excessive — first 10 entries representative enough
+    change_entries = session.change_log[:10]
     changes = "; ".join(
         f"{e.table}.{e.field} {e.old_value}→{e.new_value}"
-        for e in session.change_log
-    ) or "none"
-    os_cmds = "; ".join(
-        e.command for e in session.os_command_log
-    ) or "none"
-    system_events = "; ".join(
-        e.message for e in session.system_log
-    ) or "none"
+        for e in change_entries
+    )
+    if len(session.change_log) > 10:
+        changes += f" ... (+{len(session.change_log) - 10} more)"
+    changes = changes or "none"
+
+    # Only include non-empty logs
+    os_cmds = "; ".join(e.command for e in session.os_command_log) or "none"
+    system_events = "; ".join(e.message for e in session.system_log) or "none"
 
     duration = (session.end_time - session.start_time).total_seconds() / 60
 
@@ -26,6 +39,17 @@ def build_session_summary(session: SessionData, findings: list[Finding]) -> str:
         for f in findings
     ) or "  none"
 
+    # Only include os_cmds and system_events if non-empty
+    optional_lines = []
+    if session.os_command_log:
+        optional_lines.append(f"OS COMMANDS: {os_cmds}")
+    if session.system_log:
+        optional_lines.append(f"SYSTEM LOG: {system_events}")
+
+    optional_block = "\n".join(optional_lines)
+    if optional_block:
+        optional_block = "\n" + optional_block
+
     return f"""SESSION: {session.session_id}
 USER: {session.firefighter_user} | CONTROLLER: {session.controller}
 SYSTEM: {session.system} | CLIENT: {session.client}
@@ -33,9 +57,7 @@ START: {session.start_time.isoformat()} | DURATION: {duration:.0f} min
 REASON: {session.reason_code}
 TICKET: {session.ticket_reference}
 TRANSACTIONS: {tcodes}
-CHANGES: {changes}
-OS COMMANDS: {os_cmds}
-SYSTEM LOG: {system_events}
+CHANGES: {changes}{optional_block}
 DETERMINISTIC FINDINGS:
 {findings_text}"""
 
