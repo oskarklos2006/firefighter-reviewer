@@ -64,7 +64,7 @@ async def analyze_session(
         return {
             "session_id": session.session_id,
             "verdict": Verdict.REJECT.value,
-            "confidence": 1.0,
+            "confidence": 0.99,
             "findings": deterministic_findings,
             "suggested_correction": None,
         }
@@ -84,7 +84,11 @@ async def analyze_session(
         f for f in llm_findings
         if f.rule_id not in seen_rules
     ]
-    all_findings = deterministic_findings + llm_findings_deduped
+    _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    all_findings = sorted(
+        deterministic_findings + llm_findings_deduped,
+        key=lambda f: _SEVERITY_ORDER.get(f.severity.value, 99)
+    )
 
     verdict = parsed.get("verdict", _derive_verdict(deterministic_findings))
     confidence = float(parsed.get("confidence", 0.5))
@@ -94,7 +98,7 @@ async def analyze_session(
     critical = [f for f in deterministic_findings if f.severity == Severity.CRITICAL]
     if critical:
         verdict = Verdict.REJECT.value
-        confidence = 1.0
+        confidence = 0.99
         suggested_correction = None
 
     return {

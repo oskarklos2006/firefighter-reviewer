@@ -138,23 +138,31 @@ header {
   padding: 48px 24px;
 }
 
-/* Page title */
 .page-title {
-  margin-bottom: 40px;
+  margin-bottom: 48px;
   animation: fadeUp 0.5s ease both;
+  text-align: center;
+  padding: 20px 0;
 }
 
 .page-title h2 {
-  font-size: 28px;
+  font-size: 36px;
   font-weight: 700;
-  letter-spacing: -0.5px;
+  letter-spacing: -1px;
   color: var(--white);
-  margin-bottom: 6px;
+  margin-bottom: 10px;
+  background: linear-gradient(135deg, var(--white) 0%, var(--blue-bright) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .page-title p {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--muted);
+  max-width: 480px;
+  margin: 0 auto;
+  line-height: 1.6;
 }
 
 /* Upload zone */
